@@ -1,0 +1,26 @@
+{
+  "tickers": [
+    "ABX.TO",
+    "BHP",
+    "BVN",
+    "FSM",
+    "VOLCABC1.LM"
+  ],
+  "markowitz_max_sharpe": {
+    "retorno": 0.07736050067041988,
+    "riesgo": 0.27825543300715866,
+    "sharpe": 0.27801973113110656,
+    "pesos": {
+      "ABX.TO": 0.3773,
+      "BHP": 0.6227,
+      "BVN": 0.0,
+      "FSM": 0.0,
+      "VOLCABC1.LM": 0.0
+    }
+  },
+  "simulacion_riqueza_final": {
+    "buy_and_hold": 127896.53755904446,
+    "equiponderado": 186470.0029680024,
+    "markowitz": 252369.73844364422
+  }
+}

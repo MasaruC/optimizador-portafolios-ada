@@ -1,0 +1,21 @@
+{
+  "tickers": [
+    "ABX.TO",
+    "BHP",
+    "BVN",
+    "FSM",
+    "VOLCABC1.LM"
+  ],
+  "nsga2_max_sharpe": {
+    "retorno": 0.0775629389717869,
+    "riesgo": 0.27968017900298614,
+    "sharpe": 0.2773272644786128,
+    "pesos": {
+      "ABX.TO": 0.3443,
+      "BHP": 0.6549,
+      "BVN": 0.0003,
+      "FSM": 0.0002,
+      "VOLCABC1.LM": 0.0003
+    }
+  }
+}
