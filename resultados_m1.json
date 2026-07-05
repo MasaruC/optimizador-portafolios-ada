@@ -7,9 +7,9 @@
     "VOLCABC1.LM"
   ],
   "markowitz_max_sharpe": {
-    "retorno": 0.07736050067041988,
-    "riesgo": 0.27825543300715866,
-    "sharpe": 0.27801973113110656,
+    "retorno": 0.07736049163478673,
+    "riesgo": 0.27825547095252956,
+    "sharpe": 0.27801966074544654,
     "pesos": {
       "ABX.TO": 0.3773,
       "BHP": 0.6227,
@@ -19,8 +19,8 @@
     }
   },
   "simulacion_riqueza_final": {
-    "buy_and_hold": 127896.53755904446,
-    "equiponderado": 186470.0029680024,
-    "markowitz": 252369.73844364422
+    "buy_and_hold": 127896.53406638103,
+    "equiponderado": 186469.99345716834,
+    "markowitz": 252369.75542711583
   }
 }
