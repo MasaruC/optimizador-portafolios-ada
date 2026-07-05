@@ -5,6 +5,7 @@ import yfinance as yf
 import plotly.graph_objects as go
 import plotly.express as px
 from scipy.spatial.distance import cdist
+import time
 import itertools
 import json
 import os
@@ -48,19 +49,26 @@ def cargar_datos(tickers, inicio, fin) -> pd.DataFrame:
         datos = datos.to_frame(name=tickers[0])
     return datos.ffill().bfill()
 
-with st.spinner('Cargando serie de tiempo y generando estados...'):
+# Leemos la frecuencia global elegida
+frecuencia_sel = st.session_state.get('frecuencia', 'Mensual')
+
+with st.spinner(f'Cargando serie de tiempo y generando estados ({frecuencia_sel})...'):
     precios = cargar_datos(TICKERS, FECHA_INICIO, FECHA_FIN)
     
-    # Preparar rendimientos para los T últimos periodos (Mensuales)
-    precios_mensuales = precios.resample('ME').last()
-    retornos_mensuales = precios_mensuales.pct_change().dropna()
+    # 1. Mapeo dinámico de frecuencia
+    mapa_frecuencias = {"Semanal": "W-FRI", "Mensual": "ME", "Trimestral": "QE"}
+    codigo_freq = mapa_frecuencias.get(frecuencia_sel, "ME")
+
+    # 2. Resampleo adaptativo
+    precios_resampleados = precios.resample(codigo_freq).last()
+    retornos_resampleados = precios_resampleados.pct_change().dropna()
     
-    # Tomar exactamente los últimos T_PERIODOS para la simulación
-    if len(retornos_mensuales) > T_PERIODOS:
-        retornos_sim = retornos_mensuales.iloc[-T_PERIODOS:]
+    # 3. Tomar exactamente los últimos T_PERIODOS para la simulación
+    if len(retornos_resampleados) > T_PERIODOS:
+        retornos_sim = retornos_resampleados.iloc[-T_PERIODOS:]
         fechas_sim = retornos_sim.index
     else:
-        retornos_sim = retornos_mensuales
+        retornos_sim = retornos_resampleados
         fechas_sim = retornos_sim.index
         T_PERIODOS = len(retornos_sim)
 
@@ -79,28 +87,98 @@ col1.info(f"**Periodos a simular (T):** {T_PERIODOS} meses")
 col2.info(f"**Costo Transaccional (λ):** {LAMBDA_TC}")
 col3.info(f"**Estados Generados (Grilla):** {M}")
 
-# --- 4. INDUCCIÓN HACIA ATRÁS (BELLMAN VECTORIZADO) ---
+# --- PANEL DE CÓDIGO VISUAL (Ecuación de Bellman) ---
+CODIGO_DP = [
+    "def induccion_hacia_atras(S, T):",
+    "    V = inicializar_matriz_ceros(T, M)",
+    "    for t in reversed(range(T)):",
+    "        # 1. Costo futuro de caer en estado j",
+    "        costo_j = Subopt_cost + V[t+1]",
+    "        # 2. Sumar costo de transición (TC)",
+    "        Cost_matrix = TC_matrix + costo_j",
+    "        # 3. Ecuación de Bellman (Minimizar)",
+    "        V[t] = min(Cost_matrix, axis=1)",
+    "        politica[t] = argmin(Cost_matrix, axis=1)",
+    "    return V, politica"
+]
+
+def renderizar_codigo(linea_activa):
+    html = "<div style='background-color: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 8px; font-family: monospace; font-size: 14px; line-height: 1.5;'>"
+    for i, linea in enumerate(CODIGO_DP):
+        linea_format = linea.replace("    ", "&nbsp;&nbsp;&nbsp;&nbsp;")
+        if i == linea_activa:
+            html += f"<div style='background-color: #062f4a; border-left: 3px solid #3794ff; padding-left: 5px; width: 100%;'>{linea_format}</div>"
+        else:
+            html += f"<div style='padding-left: 8px;'>{linea_format}</div>"
+    html += "</div>"
+    return html
+
+# --- 4. INDUCCIÓN HACIA ATRÁS (ANIMADA) ---
+st.subheader("Resolviendo la Ecuación de Bellman")
+
+col_graf, col_cod = st.columns([2, 1])
+
+with col_graf:
+    grafico_placeholder = st.empty()
+    metricas_placeholder = st.empty()
+
+with col_cod:
+    st.markdown("**Algoritmo DP (Vivo):**")
+    codigo_placeholder = st.empty()
+    codigo_placeholder.markdown(renderizar_codigo(-1), unsafe_allow_html=True)
+
 if st.button("🚀 Calcular Política Óptima de Rebalanceo", type="primary", use_container_width=True):
-    with st.spinner('Resolviendo Ecuación de Bellman...'):
-        # Costo de transacción estático entre cualquier estado i y j
-        TC_matrix = LAMBDA_TC * cdist(S, S, metric='cityblock')
+    with st.spinner('Construyendo la matriz de costos paso a paso...'):
+        codigo_placeholder.markdown(renderizar_codigo(0), unsafe_allow_html=True)
+        time.sleep(0.3)
         
-        # Costo de penalidad (distancia al portafolio óptimo de Markowitz)
+        # Inicialización
+        codigo_placeholder.markdown(renderizar_codigo(1), unsafe_allow_html=True)
+        TC_matrix = LAMBDA_TC * cdist(S, S, metric='cityblock')
         Subopt_cost = np.sum((S - w_optimo)**2, axis=1)
         
-        # Matrices de Valor (V) y Política (Decisiones)
         V = np.zeros((T_PERIODOS + 1, M))
         politica = np.zeros((T_PERIODOS, M), dtype=int)
+        time.sleep(0.3)
         
-        # Backward Induction
+        # --- BUCLE DE INDUCCIÓN HACIA ATRÁS ---
         for t in range(T_PERIODOS - 1, -1, -1):
-            # Costo = Transición + Suboptimalidad de caer en j + Valor futuro de j
-            costo_j = Subopt_cost + V[t+1]
-            Cost_matrix = TC_matrix + costo_j # Broadcasting
+            codigo_placeholder.markdown(renderizar_codigo(2), unsafe_allow_html=True)
             
+            codigo_placeholder.markdown(renderizar_codigo(4), unsafe_allow_html=True)
+            costo_j = Subopt_cost + V[t+1]
+            time.sleep(0.1)
+            
+            codigo_placeholder.markdown(renderizar_codigo(6), unsafe_allow_html=True)
+            Cost_matrix = TC_matrix + costo_j
+            
+            codigo_placeholder.markdown(renderizar_codigo(8), unsafe_allow_html=True)
             mejor_accion = np.argmin(Cost_matrix, axis=1)
             V[t] = Cost_matrix[np.arange(M), mejor_accion]
+            
+            codigo_placeholder.markdown(renderizar_codigo(9), unsafe_allow_html=True)
             politica[t] = mejor_accion
+            
+            # Animación del Heatmap
+            fig_heatmap = px.imshow(
+                V, 
+                labels=dict(x="ID del Estado (Combinación de Pesos)", y="Periodo (t)", color="Costo Acumulado"), 
+                title=f"Matriz de Costos de Bellman (Calculando periodo t={t})", 
+                color_continuous_scale="Viridis", 
+                aspect="auto"
+            )
+            fig_heatmap.update_layout(yaxis=dict(autorange="reversed"))
+            
+            # Línea trazadora que muestra el progreso del algoritmo hacia atrás
+            fig_heatmap.add_hline(y=t, line_width=2, line_dash="dash", line_color="red")
+            
+            grafico_placeholder.plotly_chart(fig_heatmap, use_container_width=True)
+            metricas_placeholder.info(f"🧮 Optimizando decisiones para el mes {t} considerando el impacto en el mes {T_PERIODOS}")
+            time.sleep(0.15) # Ajusta la velocidad de la animación aquí
+
+        codigo_placeholder.markdown(renderizar_codigo(10), unsafe_allow_html=True)
+        metricas_placeholder.success("¡Matriz de Costos completada! Simulando ruta óptima hacia adelante...")
+        time.sleep(1)
 
         # --- 5. SIMULACIÓN HACIA ADELANTE (FORWARD SIMULATION) ---
         W_bh = np.zeros(T_PERIODOS + 1)
@@ -118,20 +196,19 @@ if st.button("🚀 Calcular Política Óptima de Rebalanceo", type="primary", us
         for t in range(T_PERIODOS):
             ret = np.array(retornos_sim.iloc[t].values, dtype=float)
             
-            # 1. Estrategia Buy & Hold (Sin rebalancear)
+            # 1. Estrategia Buy & Hold
             ret_bh = np.dot(w_bh, ret)
             W_bh[t+1] = W_bh[t] * (1 + ret_bh)
-            w_bh = w_bh * (1 + ret) / (1 + ret_bh) # Deriva de pesos
+            w_bh = w_bh * (1 + ret) / (1 + ret_bh)
             
-            # 2. Estrategia Siempre Rebalancear (Forzar w_optimo cada mes)
+            # 2. Estrategia Siempre Rebalancear
             tc_sr = LAMBDA_TC * np.sum(np.abs(w_sr - w_optimo))
             capital_post_tc_sr = W_sr[t] * (1 - tc_sr)
             ret_sr = np.dot(w_optimo, ret)
             W_sr[t+1] = capital_post_tc_sr * (1 + ret_sr)
             w_sr = w_optimo * (1 + ret) / (1 + ret_sr)
             
-            # 3. Estrategia Programación Dinámica (Inteligente)
-            # Encontrar el estado actual en la grilla más cercano a w_dp
+            # 3. Estrategia Programación Dinámica
             idx_s = int(np.argmin(np.sum(np.abs(S - w_dp), axis=1)))
             idx_a = int(politica[t, idx_s])
             w_dp_nuevo = S[idx_a]
@@ -146,11 +223,9 @@ if st.button("🚀 Calcular Política Óptima de Rebalanceo", type="primary", us
             W_dp[t+1] = capital_post_tc_dp * (1 + ret_dp)
             w_dp = w_dp_nuevo * (1 + ret) / (1 + ret_dp)
 
-        st.success("¡Optimización de Programación Dinámica Completada!")
-
-        # --- 6. VISUALIZACIÓN DE RESULTADOS ---
+        # --- 6. VISUALIZACIÓN DE RESULTADOS FINALES ---
         st.divider()
-        st.subheader("Rendimiento de Estrategias (Últimos 12 meses)")
+        st.subheader(f"Rendimiento de Estrategias (Últimos {T_PERIODOS} periodos de frecuencia {frecuencia_sel.lower()})")
         
         fechas_plot = [fechas_sim[0] - pd.DateOffset(months=1)] + list(fechas_sim)
         
@@ -159,21 +234,11 @@ if st.button("🚀 Calcular Política Óptima de Rebalanceo", type="primary", us
         fig_riqueza.add_trace(go.Scatter(x=fechas_plot, y=W_sr, mode='lines', name=f'Siempre Rebalancear (${W_sr[-1]:,.2f})', line=dict(color='red', dash='dash')))
         fig_riqueza.add_trace(go.Scatter(x=fechas_plot, y=W_bh, mode='lines', name=f'Buy & Hold (${W_bh[-1]:,.2f})', line=dict(color='gray', dash='dot')))
         
-        # Marcar los momentos exactos de rebalanceo sugeridos por DP
         for t_reb in rebalanceos_dp:
             fig_riqueza.add_vline(x=fechas_plot[t_reb+1], line_width=1.5, line_dash="dash", line_color="purple", annotation_text="Rebalanceo", annotation_position="bottom right")
 
-        fig_riqueza.update_layout(title="Simulación de Riqueza con Costos de Transacción", xaxis_title="Fecha", yaxis_title="Capital (USD)", hovermode="x unified")
+        fig_riqueza.update_layout(title="Comparativa de Crecimiento de Capital", xaxis_title="Fecha", yaxis_title="Capital (USD)", hovermode="x unified")
         st.plotly_chart(fig_riqueza, use_container_width=True)
-
-        st.divider()
-        
-        # Heatmap de la Matriz V (Costos Futuros Óptimos)
-        st.subheader("Mapa de Calor (Heatmap): Costos Óptimos J*(t,s)")
-        fig_heatmap = px.imshow(V, labels=dict(x="ID del Estado (Combinación de Pesos)", y="Periodo de Tiempo (Meses)", color="Costo Acumulado"), 
-                                title="Matriz de Costos de Bellman", color_continuous_scale="Viridis", aspect="auto")
-        fig_heatmap.update_layout(yaxis=dict(autorange="reversed"))
-        st.plotly_chart(fig_heatmap, use_container_width=True)
 
         # --- 7. EXPORTACIÓN DE RESULTADOS ---
         metrics_m3 = {
