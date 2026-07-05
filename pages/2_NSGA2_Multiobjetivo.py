@@ -5,6 +5,7 @@ import yfinance as yf
 import plotly.graph_objects as go
 import plotly.express as px
 from deap import base, creator, tools, algorithms
+import time
 import random
 import json
 import io
@@ -98,58 +99,141 @@ toolbox.register("mate", cruce_portafolio)
 toolbox.register("mutate", mutacion_portafolio, indpb=0.2)
 toolbox.register("select", tools.selNSGA2)
 
-# --- 4. EJECUCIÓN DEL ALGORITMO ---
+# --- PANEL DE CÓDIGO VISUAL ---
+CODIGO_NSGA2 = [
+    "def evolucion_nsga2(poblacion_inicial):",
+    "    pop = evaluar_fitness(poblacion_inicial)",
+    "    for gen in range(GENERACIONES):",
+    "        # 1. Selección por Torneo",
+    "        padres = seleccion_torneo(pop)",
+    "        # 2. Recombinación (Cruce)",
+    "        hijos = aplicar_cruce(padres)",
+    "        # 3. Mutación Genética",
+    "        hijos = aplicar_mutacion(hijos)",
+    "        # 4. Evaluación de nueva generación",
+    "        evaluar_fitness(hijos)",
+    "        # 5. Reemplazo (Supervivencia del más apto)",
+    "        pop = seleccionar_mejores(pop + hijos)",
+    "    return extraer_frente_pareto(pop)"
+]
+
+def renderizar_codigo(linea_activa):
+    html = "<div style='background-color: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 8px; font-family: monospace; font-size: 14px; line-height: 1.5;'>"
+    for i, linea in enumerate(CODIGO_NSGA2):
+        linea_format = linea.replace("    ", "&nbsp;&nbsp;&nbsp;&nbsp;")
+        if i == linea_activa:
+            html += f"<div style='background-color: #062f4a; border-left: 3px solid #3794ff; padding-left: 5px; width: 100%;'>{linea_format}</div>"
+        else:
+            html += f"<div style='padding-left: 8px;'>{linea_format}</div>"
+    html += "</div>"
+    return html
+
+# --- 4. EJECUCIÓN DEL ALGORITMO VISUAL ---
+st.subheader("Evolución del Frente de Pareto en Tiempo Real")
+
+col_graf, col_cod = st.columns([2, 1])
+
+with col_graf:
+    grafico_placeholder = st.empty()
+    metricas_placeholder = st.empty()
+
+with col_cod:
+    st.markdown("**Algoritmo Genético (Vivo):**")
+    codigo_placeholder = st.empty()
+    codigo_placeholder.markdown(renderizar_codigo(-1), unsafe_allow_html=True)
+
 if st.button("🚀 Ejecutar Evolución NSGA-II", type="primary", use_container_width=True):
+    # Variables para guardar el historial del mejor Sharpe global
+    mejor_sharpe_historico = -1
+    
     with st.spinner(f'Evolucionando {POBLACION} individuos por {GENERACIONES} generaciones...'):
         random.seed(42)
-        pop = toolbox.population(n=POBLACION) # type: ignore
+        codigo_placeholder.markdown(renderizar_codigo(0), unsafe_allow_html=True)
+        time.sleep(0.3)
         
-        # 1. Evaluar población inicial
+        pop = toolbox.population(n=POBLACION) # type: ignore
+        codigo_placeholder.markdown(renderizar_codigo(1), unsafe_allow_html=True)
+        
         fitnesses = list(map(toolbox.evaluate, pop)) # type: ignore
         for ind, fit in zip(pop, fitnesses):
             ind.fitness.values = fit
             
-        # --- CORRECCIÓN CRÍTICA ---
-        # Pasar la población inicial por selNSGA2 para calcular y asignar 'crowding_dist'
         pop = toolbox.select(pop, len(pop)) # type: ignore
-        # --------------------------
+        time.sleep(0.3)
             
-        # 2. Bucle generacional NSGA-II
+        # --- BUCLE GENERACIONAL ANIMADO ---
         for gen in range(GENERACIONES):
-            # Ahora sí tienen crowding_dist para el torneo
+            codigo_placeholder.markdown(renderizar_codigo(2), unsafe_allow_html=True)
+            
+            # 1. Torneo
+            codigo_placeholder.markdown(renderizar_codigo(4), unsafe_allow_html=True)
             offspring = tools.selTournamentDCD(pop, len(pop))
             offspring = [toolbox.clone(ind) for ind in offspring] # type: ignore
             
-            # Cruce
+            # 2. Cruce
+            codigo_placeholder.markdown(renderizar_codigo(6), unsafe_allow_html=True)
             for ind1, ind2 in zip(offspring[::2], offspring[1::2]):
-                if random.random() < 0.8: # Probabilidad de cruce
+                if random.random() < 0.8:
                     toolbox.mate(ind1, ind2) # type: ignore
                     del ind1.fitness.values, ind2.fitness.values
                     
-            # Mutación
+            # 3. Mutación
+            codigo_placeholder.markdown(renderizar_codigo(8), unsafe_allow_html=True)
             for ind in offspring:
-                if random.random() < 0.2: # Probabilidad de mutación
+                if random.random() < 0.2:
                     toolbox.mutate(ind) # type: ignore
                     del ind.fitness.values
                     
-            # Evaluar a los hijos que mutaron/cruzaron
+            # 4. Evaluar
+            codigo_placeholder.markdown(renderizar_codigo(10), unsafe_allow_html=True)
             invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
             fitnesses = toolbox.map(toolbox.evaluate, invalid_ind) # type: ignore
             for ind, fit in zip(invalid_ind, fitnesses):
                 ind.fitness.values = fit
                 
-            # Seleccionar la siguiente generación (esto actualiza crowding_dist nuevamente)
+            # 5. Selección de la nueva generación
+            codigo_placeholder.markdown(renderizar_codigo(12), unsafe_allow_html=True)
             pop = toolbox.select(pop + offspring, POBLACION) # type: ignore
-        
-        # Extraer Frente de Pareto
+            
+            # --- ACTUALIZACIÓN VISUAL POR GENERACIÓN ---
+            # Extraer datos de la población actual
+            riesgos_gen = [ind.fitness.values[1] for ind in pop]
+            retornos_gen = [ind.fitness.values[0] for ind in pop]
+            
+            # Actualizar métricas intermedias
+            sharpes_gen = [(ret - RF) / rsk if rsk > 0 else 0 for ret, rsk in zip(retornos_gen, riesgos_gen)]
+            mejor_sharpe_gen = max(sharpes_gen)
+            if mejor_sharpe_gen > mejor_sharpe_historico:
+                mejor_sharpe_historico = mejor_sharpe_gen
+                
+            # Renderizar el gráfico de dispersión (el "Enjambre")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=riesgos_gen, y=retornos_gen, mode='markers',
+                name=f'Población Gen {gen+1}',
+                marker=dict(color='rgba(0, 150, 255, 0.6)', size=8, line=dict(width=1, color='DarkSlateGrey'))
+            ))
+            fig.update_layout(
+                title=f'Búsqueda NSGA-II - Generación {gen+1}/{GENERACIONES}',
+                xaxis_title='Riesgo (Volatilidad)', yaxis_title='Retorno Esperado',
+                xaxis=dict(range=[min(riesgos_gen)*0.9, max(riesgos_gen)*1.1]), # Mantener la escala estable ayuda a la animación
+                yaxis=dict(range=[min(retornos_gen)*0.9, max(retornos_gen)*1.1]),
+                hovermode='closest'
+            )
+            grafico_placeholder.plotly_chart(fig, use_container_width=True)
+            metricas_placeholder.info(f"🧬 Procesando Generación {gen+1} | Mejor Sharpe Actual: {mejor_sharpe_historico:.4f}")
+            
+            # Pequeña pausa para apreciar el movimiento (ajusta a tu gusto)
+            time.sleep(0.05) 
+            
+        # --- FIN DEL BUCLE: EXTRAER RESULTADOS FINALES ---
+        codigo_placeholder.markdown(renderizar_codigo(13), unsafe_allow_html=True)
         frente_pareto = tools.sortNondominated(pop, len(pop), first_front_only=True)[0]
         
-        # Extraer métricas del frente
         riesgos = [ind.fitness.values[1] for ind in frente_pareto]
         retornos_pareto = [ind.fitness.values[0] for ind in frente_pareto]
         sharpes = [(ret - RF) / rsk if rsk > 0 else 0 for ret, rsk in zip(retornos_pareto, riesgos)]
         
-        # Encontrar el mejor individuo según Sharpe
         idx_mejor_sharpe = np.argmax(sharpes)
         mejor_ind = frente_pareto[idx_mejor_sharpe]
         mejor_pesos = np.array(mejor_ind) / np.sum(mejor_ind)
@@ -157,9 +241,9 @@ if st.button("🚀 Ejecutar Evolución NSGA-II", type="primary", use_container_w
         mejor_rsk = riesgos[idx_mejor_sharpe]
         mejor_sharpe = sharpes[idx_mejor_sharpe]
 
-        st.success("¡Evolución completada con éxito!")
+        metricas_placeholder.success("¡Evolución completada con éxito!")
 
-        # --- 5. VISUALIZACIÓN DE RESULTADOS ---
+        # --- 5. VISUALIZACIÓN FINAL (Estática) ---
         st.divider()
         st.subheader("Resultados del Mejor Individuo (Máximo Sharpe Evolutivo)")
         
@@ -174,7 +258,7 @@ if st.button("🚀 Ejecutar Evolución NSGA-II", type="primary", use_container_w
             fig_pareto = go.Figure()
             fig_pareto.add_trace(go.Scatter(
                 x=riesgos, y=retornos_pareto, mode='markers',
-                name='Frente de Pareto (NSGA-II)',
+                name='Frente de Pareto Final',
                 marker=dict(color='blue', size=8, opacity=0.7)
             ))
             fig_pareto.add_trace(go.Scatter(
