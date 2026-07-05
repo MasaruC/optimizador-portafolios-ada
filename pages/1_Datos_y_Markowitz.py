@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from scipy.optimize import minimize
+import time
 import json
 import io
 
@@ -56,7 +57,7 @@ retornos = pd.DataFrame(np.log(precios / precios.shift(1))).dropna()
 mu = retornos.mean().to_numpy(dtype=float) * DIAS_ANIO
 Sigma = retornos.cov().to_numpy(dtype=float) * DIAS_ANIO
 
-# --- 4. OPTIMIZACIÓN DE MARKOWITZ ---
+# --- 4. OPTIMIZACIÓN DE MARKOWITZ Y CALLBACK ---
 def estadisticas(w):
     w = np.asarray(w, dtype=float)
     r = float(w @ mu)
@@ -74,20 +75,7 @@ restriccion_suma = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0})
 limites = tuple((0.0, 1.0) for _ in range(N))
 w0 = np.ones(N) / N
 
-res_sharpe = minimize(neg_sharpe, w0, method='SLSQP', bounds=limites, constraints=restriccion_suma)
-w_sharpe = res_sharpe.x
-r_s, v_s, sh_s = estadisticas(w_sharpe)
-
-res_minvar = minimize(varianza, w0, method='SLSQP', bounds=limites, constraints=restriccion_suma)
-w_minvar = res_minvar.x
-r_m, v_m, sh_m = estadisticas(w_minvar)
-
-ret_portafolio = retornos.dot(w_sharpe)
-ret_negativos = ret_portafolio[ret_portafolio < 0]
-downside_dev = np.sqrt(np.mean(ret_negativos**2)) * np.sqrt(DIAS_ANIO)
-sortino_s = (r_s - RF) / downside_dev if downside_dev > 0 else 0
-
-# --- CÁLCULO DE LA FRONTERA EFICIENTE ---
+# --- CÁLCULO DE LA FRONTERA EFICIENTE (Se mantiene igual) ---
 @st.cache_data(show_spinner=False)
 def calcular_frontera(_mu, _Sigma, _w0, _limites, _N):
     frontera = []
@@ -101,98 +89,223 @@ def calcular_frontera(_mu, _Sigma, _w0, _limites, _N):
     return np.array(frontera)
 
 frontera = calcular_frontera(mu, Sigma, w0, limites, N)
+vol_ind = np.sqrt(np.diag(Sigma)) # Riesgo individual de cada acción
 
-# --- 5. INTERFAZ GRÁFICA (MÉTRICAS Y GRÁFICOS) ---
-st.subheader("Indicadores del Portafolio Máximo Sharpe")
-col1, col2, col3 = st.columns(3)
-col1.metric("Sharpe Ratio", f"{sh_s:.4f}")
-col2.metric("Sortino Ratio", f"{sortino_s:.4f}")
-col3.metric("Volatilidad Anual", f"{v_s*100:.2f}%")
+# --- 5. INTERFAZ GRÁFICA Y VISUALIZACIÓN DEL PROCESO ---
+st.subheader("Búsqueda del Portafolio Óptimo (Máximo Sharpe)")
 
-st.divider()
+# 1. Definir el pseudocódigo que vamos a mostrar
+CODIGO_ALGORITMO = [
+    "def optimizar_markowitz(w_inicial):",
+    "    while no_converge:",
+    "        # Evaluar riesgo y retorno actual",
+    "        r, v = calcular_estadisticas(w)",
+    "        # Calcular gradientes y restricciones",
+    "        direccion = evaluar_slsqp()",
+    "        # Actualizar pesos del portafolio",
+    "        w_nuevo = aplicar_paso(w, direccion)",
+    "    return w_optimo"
+]
 
-col_graf1, col_graf2 = st.columns([2, 1])
+def renderizar_codigo(linea_activa):
+    """Genera HTML para mostrar el código con la línea activa resaltada"""
+    html = "<div style='background-color: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 8px; font-family: monospace; font-size: 14px; line-height: 1.5;'>"
+    for i, linea in enumerate(CODIGO_ALGORITMO):
+        # Escapar espacios para mantener la indentación en HTML
+        linea_format = linea.replace("    ", "&nbsp;&nbsp;&nbsp;&nbsp;")
+        
+        if i == linea_activa:
+            # Sombreado azul estilo VS Code
+            html += f"<div style='background-color: #062f4a; border-left: 3px solid #3794ff; padding-left: 5px; width: 100%;'>{linea_format}</div>"
+        else:
+            html += f"<div style='padding-left: 8px;'>{linea_format}</div>"
+    html += "</div>"
+    return html
 
-with col_graf1:
-    fig_frontera = go.Figure()
-    vol_ind = np.sqrt(np.diag(Sigma))
+# 2. Crear las columnas para la interfaz lado a lado
+col_grafico, col_codigo = st.columns([2, 1])
+
+with col_grafico:
+    grafico_placeholder = st.empty()
+    metricas_placeholder = st.empty()
+
+with col_codigo:
+    st.markdown("**Ejecución en vivo:**")
+    codigo_placeholder = st.empty()
+    codigo_placeholder.markdown(renderizar_codigo(-1), unsafe_allow_html=True) # Sin resaltar al inicio
+
+iniciar_animacion = st.button("▶️ Ejecutar y Visualizar Algoritmo")
+
+# 3. Lógica de ejecución y sombreado con INTERPOLACIÓN
+if iniciar_animacion:
+    # Empezamos el historial guardando el peso inicial (equiponderado)
+    historial_w = [w0.copy()]
+    historial_v = []
+    historial_r = []
     
-    fig_frontera.add_trace(go.Scatter(x=frontera[:, 0], y=frontera[:, 1], mode='lines', name='Frontera Eficiente', line=dict(color='blue')))
-    fig_frontera.add_trace(go.Scatter(x=vol_ind, y=mu, mode='markers+text', name='Acciones', text=TICKERS_VALIDOS, textposition='top center', marker=dict(color='gray', size=10)))
-    fig_frontera.add_trace(go.Scatter(x=[v_s], y=[r_s], mode='markers', name=f'Máx Sharpe ({sh_s:.2f})', marker=dict(color='red', symbol='star', size=15)))
-    fig_frontera.add_trace(go.Scatter(x=[v_m], y=[r_m], mode='markers', name='Mín Varianza', marker=dict(color='green', size=12)))
+    # Calcular y guardar el punto exacto de inicio
+    r_ini, v_ini, sh_ini = estadisticas(w0)
+    historial_v.append(v_ini)
+    historial_r.append(r_ini)
     
-    fig_frontera.update_layout(title='Frontera Eficiente de Markowitz', xaxis_title='Riesgo (Volatilidad)', yaxis_title='Retorno Esperado', hovermode='closest')
-    st.plotly_chart(fig_frontera, use_container_width=True)
+    codigo_placeholder.markdown(renderizar_codigo(0), unsafe_allow_html=True)
+    time.sleep(0.5)
+    
+    def callback_optimizacion(xk):
+        w_prev = historial_w[-1]
+        w_curr = xk.copy()
+        
+        # --- LA MAGIA: Interpolación de pesos ---
+        # Creamos 10 "cuadros" intermedios entre la iteración anterior y la actual
+        num_frames = 10 
+        
+        for alpha in np.linspace(1/num_frames, 1.0, num_frames):
+            # Transición lineal de los pesos del portafolio
+            w_inter = (1 - alpha) * w_prev + alpha * w_curr
+            
+            # Calculamos dónde cae este portafolio intermedio en el plano Riesgo/Retorno
+            r_temp, v_temp, sh_temp = estadisticas(w_inter)
+            
+            historial_v.append(v_temp)
+            historial_r.append(r_temp)
+            
+            # --- Actualización del Gráfico Cuadro por Cuadro ---
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=frontera[:, 0], y=frontera[:, 1], mode='lines', name='Frontera', line=dict(color='rgba(0, 0, 255, 0.3)')))
+            fig.add_trace(go.Scatter(x=vol_ind, y=mu, mode='markers+text', name='Acciones', text=TICKERS_VALIDOS, textposition='top center', marker=dict(color='gray', size=10)))
+            
+            # Dibujamos el camino recorrido hasta ahora
+            fig.add_trace(go.Scatter(x=historial_v, y=historial_r, mode='lines', name='Ruta', line=dict(color='orange', width=3, dash='dot')))
+            
+            # Destacamos el punto exacto que se está evaluando en este milisegundo
+            fig.add_trace(go.Scatter(x=[v_temp], y=[r_temp], mode='markers', name='Explorando...', marker=dict(color='red', symbol='star', size=12)))
+            
+            fig.update_layout(title='Optimizando (Interpolación Activa)...', xaxis_title='Riesgo', yaxis_title='Retorno', showlegend=False)
+            
+            grafico_placeholder.plotly_chart(fig, use_container_width=True)
+            metricas_placeholder.success(f"Explorando... Sharpe: {sh_temp:.4f} | Volatilidad: {v_temp*100:.2f}%")
+            
+            # Pausa muy corta para lograr 20-30 FPS visuales
+            time.sleep(0.04) 
+            
+        # Al terminar la animación de los puntos, animamos el pseudocódigo
+        pasos_bucle = [2, 3, 4, 5, 6, 7]
+        for paso in pasos_bucle:
+            codigo_placeholder.markdown(renderizar_codigo(paso), unsafe_allow_html=True)
+            time.sleep(0.1) 
+            
+        # Guardamos el peso actual para que sea el punto de partida de la siguiente iteración
+        historial_w.append(w_curr)
 
-with col_graf2:
-    df_pesos = pd.DataFrame({'Ticker': TICKERS_VALIDOS, 'Peso': w_sharpe})
-    df_pesos = df_pesos[df_pesos['Peso'] > 0.01]
-    fig_pie = px.pie(df_pesos, values='Peso', names='Ticker', title='Composición Máx. Sharpe', hole=0.3, color_discrete_sequence=px.colors.qualitative.Set3)
-    st.plotly_chart(fig_pie, use_container_width=True)
+    with st.spinner("Ejecutando motor matemático..."):
+        res = minimize(neg_sharpe, w0, method='SLSQP', bounds=limites, constraints=restriccion_suma, callback=callback_optimizacion)
+        
+        w_sharpe = res.x
+        r_s, v_s, sh_s = estadisticas(w_sharpe)
+        
+        codigo_placeholder.markdown(renderizar_codigo(8), unsafe_allow_html=True)
+        metricas_placeholder.success(f"¡Óptimo! Sharpe final: {sh_s:.4f} | Volatilidad: {v_s*100:.2f}% | Retorno: {r_s*100:.2f}%")
+        
+        # Gráfico Final (Limpio y estático)
+        fig_final = go.Figure()
+        fig_final.add_trace(go.Scatter(x=frontera[:, 0], y=frontera[:, 1], mode='lines', name='Frontera Eficiente', line=dict(color='blue')))
+        fig_final.add_trace(go.Scatter(x=vol_ind, y=mu, mode='markers+text', name='Acciones', text=TICKERS_VALIDOS, textposition='top center', marker=dict(color='gray', size=10)))
+        fig_final.add_trace(go.Scatter(x=historial_v, y=historial_r, mode='lines', name='Ruta Recorrida', line=dict(color='rgba(255, 165, 0, 0.5)', width=2)))
+        fig_final.add_trace(go.Scatter(x=[v_s], y=[r_s], mode='markers', name=f'Máx Sharpe ({sh_s:.2f})', marker=dict(color='red', symbol='star', size=16)))
+        fig_final.update_layout(title='Frontera Eficiente de Markowitz (Final)', xaxis_title='Riesgo', yaxis_title='Retorno')
+        
+        grafico_placeholder.plotly_chart(fig_final, use_container_width=True)
 
-st.divider()
-
+else:
+    # ESTADO POR DEFECTO: Cálculo silencioso sin animación
+    res = minimize(neg_sharpe, w0, method='SLSQP', bounds=limites, constraints=restriccion_suma)
+    
+    # EXTRAER VARIABLES
+    w_sharpe = res.x
+    r_s, v_s, sh_s = estadisticas(w_sharpe)
+    
+    # Renderizar el gráfico final directamente
+    fig_final = go.Figure()
+    fig_final.add_trace(go.Scatter(x=frontera[:, 0], y=frontera[:, 1], mode='lines', name='Frontera Eficiente', line=dict(color='blue')))
+    fig_final.add_trace(go.Scatter(x=vol_ind, y=mu, mode='markers+text', name='Acciones', text=TICKERS_VALIDOS, textposition='top center', marker=dict(color='gray', size=10)))
+    fig_final.add_trace(go.Scatter(x=[v_s], y=[r_s], mode='markers', name=f'Máx Sharpe ({sh_s:.2f})', marker=dict(color='red', symbol='star', size=15)))
+    fig_final.update_layout(title='Frontera Eficiente de Markowitz (Final)', xaxis_title='Riesgo', yaxis_title='Retorno')
+    
+    grafico_placeholder.plotly_chart(fig_final, use_container_width=True)
+    metricas_placeholder.success(f"Sharpe óptimo: {sh_s:.4f} | Volatilidad: {v_s*100:.2f}% | Retorno: {r_s*100:.2f}%")
+    codigo_placeholder.markdown(renderizar_codigo(8), unsafe_allow_html=True) # Mostrar en la línea final "return w_optimo"
 # --- 6. SIMULACIÓN DE RIQUEZA ---
 st.subheader("Simulación de Evolución de Riqueza")
-precios_mensuales = precios.resample('ME').last()
-retornos_mensuales = precios_mensuales.pct_change().dropna()
-n_meses = len(retornos_mensuales)
 
-riqueza_bh = np.zeros(n_meses + 1)
-riqueza_mk = np.zeros(n_meses + 1)
-riqueza_eq = np.zeros(n_meses + 1)
-riqueza_bh[0] = riqueza_mk[0] = riqueza_eq[0] = CAPITAL_INICIAL
+if 'w_sharpe' in locals():
+    # 1. Aplicamos el mapeo de frecuencia dinámico del sidebar
+    mapa_frecuencias = {"Semanal": "W-FRI", "Mensual": "ME", "Trimestral": "QE"}
+    frecuencia_sel = st.session_state.get('frecuencia', 'Mensual')
+    codigo_freq = mapa_frecuencias.get(frecuencia_sel, "ME")
 
-pesos_bh = w0.copy()
-w_eq = np.ones(N) / N
+    # 2. Resampleamos con los nuevos nombres
+    precios_resampleados = precios.resample(codigo_freq).last()
+    retornos_resampleados = precios_resampleados.pct_change().dropna()
+    n_periodos = len(retornos_resampleados)
 
-for i in range(n_meses):
-    # Corrección Pylance (Línea 151): Asegurar arreglo numérico
-    ret_mes = np.array(retornos_mensuales.iloc[i].values, dtype=float)
-    
-    riqueza_eq[i+1] = riqueza_eq[i] * (1 + np.dot(w_eq, ret_mes))
-    riqueza_mk[i+1] = riqueza_mk[i] * (1 + np.dot(w_sharpe, ret_mes))
-    
-    ret_portafolio_bh = np.dot(pesos_bh, ret_mes)
-    riqueza_bh[i+1] = riqueza_bh[i] * (1 + ret_portafolio_bh)
-    pesos_bh = pesos_bh * (1 + ret_mes) / (1 + ret_portafolio_bh)
+    riqueza_bh = np.zeros(n_periodos + 1)
+    riqueza_mk = np.zeros(n_periodos + 1)
+    riqueza_eq = np.zeros(n_periodos + 1)
+    riqueza_bh[0] = riqueza_mk[0] = riqueza_eq[0] = CAPITAL_INICIAL
 
-fechas_sim = np.append([precios_mensuales.index[0]], retornos_mensuales.index)
+    pesos_bh = w0.copy()
+    w_eq = np.ones(N) / N
 
-fig_sim = go.Figure()
-fig_sim.add_trace(go.Scatter(x=fechas_sim, y=riqueza_mk, mode='lines', name=f'Markowitz Rebalanceado (${riqueza_mk[-1]:,.2f})', line=dict(color='red')))
-fig_sim.add_trace(go.Scatter(x=fechas_sim, y=riqueza_eq, mode='lines', name=f'Equiponderado Mensual (${riqueza_eq[-1]:,.2f})', line=dict(color='blue')))
-fig_sim.add_trace(go.Scatter(x=fechas_sim, y=riqueza_bh, mode='lines', name=f'Buy & Hold (${riqueza_bh[-1]:,.2f})', line=dict(color='gray')))
+    # Iteramos sobre n_periodos en lugar de n_meses
+    for i in range(n_periodos):
+        ret_periodo = np.array(retornos_resampleados.iloc[i].values, dtype=float)
+        
+        riqueza_eq[i+1] = riqueza_eq[i] * (1 + np.dot(w_eq, ret_periodo))
+        riqueza_mk[i+1] = riqueza_mk[i] * (1 + np.dot(w_sharpe, ret_periodo))
+        
+        ret_portafolio_bh = np.dot(pesos_bh, ret_periodo)
+        riqueza_bh[i+1] = riqueza_bh[i] * (1 + ret_portafolio_bh)
+        pesos_bh = pesos_bh * (1 + ret_periodo) / (1 + ret_portafolio_bh)
 
-fig_sim.update_layout(title='Crecimiento de Estrategias (2015-2024)', xaxis_title='Fecha', yaxis_title='Capital (USD)')
-st.plotly_chart(fig_sim, use_container_width=True)
+    # Actualizamos las referencias para la gráfica
+    fechas_sim = np.append([precios_resampleados.index[0]], retornos_resampleados.index)
 
-# --- 7. EXPORTACIÓN DE RESULTADOS ---
-metrics = {
-    "tickers": TICKERS_VALIDOS,
-    "markowitz_max_sharpe": {
-        "retorno": float(r_s), "riesgo": float(v_s), "sharpe": float(sh_s),
-        "pesos": dict(zip(TICKERS_VALIDOS, w_sharpe.round(4).tolist()))
-    },
-    "simulacion_riqueza_final": {
-        "buy_and_hold": float(riqueza_bh[-1]),
-        "equiponderado": float(riqueza_eq[-1]),
-        "markowitz": float(riqueza_mk[-1])
+    fig_sim = go.Figure()
+    fig_sim.add_trace(go.Scatter(x=fechas_sim, y=riqueza_mk, mode='lines', name=f'Markowitz Rebalanceado (${riqueza_mk[-1]:,.2f})', line=dict(color='red')))
+    fig_sim.add_trace(go.Scatter(x=fechas_sim, y=riqueza_eq, mode='lines', name=f'Equiponderado (${riqueza_eq[-1]:,.2f})', line=dict(color='blue')))
+    fig_sim.add_trace(go.Scatter(x=fechas_sim, y=riqueza_bh, mode='lines', name=f'Buy & Hold (${riqueza_bh[-1]:,.2f})', line=dict(color='gray')))
+
+    fig_sim.update_layout(title=f'Crecimiento de Estrategias (Rebalanceo {frecuencia_sel})', xaxis_title='Fecha', yaxis_title='Capital (USD)')
+    st.plotly_chart(fig_sim, use_container_width=True)
+
+    # --- 7. EXPORTACIÓN DE RESULTADOS ---
+    metrics = {
+        "tickers": TICKERS_VALIDOS,
+        "markowitz_max_sharpe": {
+            "retorno": float(r_s), "riesgo": float(v_s), "sharpe": float(sh_s),
+            "pesos": dict(zip(TICKERS_VALIDOS, w_sharpe.round(4).tolist()))
+        },
+        "simulacion_riqueza_final": {
+            "buy_and_hold": float(riqueza_bh[-1]),
+            "equiponderado": float(riqueza_eq[-1]),
+            "markowitz": float(riqueza_mk[-1])
+        }
     }
-}
-with open("resultados_m1.json", "w", encoding="utf-8") as f:
-    json.dump(metrics, f, ensure_ascii=False, indent=2)
+    with open("resultados_m1.json", "w", encoding="utf-8") as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
 
-buffer = io.BytesIO()
-df_pesos_completo = pd.DataFrame({'Ticker': TICKERS_VALIDOS, 'Peso (%)': (w_sharpe * 100).round(2)})
-with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-    df_pesos_completo.to_excel(writer, index=False, sheet_name='Pesos_Optimos')
-buffer.seek(0)
+    buffer = io.BytesIO()
+    df_pesos_completo = pd.DataFrame({'Ticker': TICKERS_VALIDOS, 'Peso (%)': (w_sharpe * 100).round(2)})
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        df_pesos_completo.to_excel(writer, index=False, sheet_name='Pesos_Optimos')
+    buffer.seek(0)
 
-st.download_button(
-    label="📥 Descargar Pesos del Portafolio Óptimo (Excel)",
-    data=buffer,
-    file_name="pesos_markowitz.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+    st.download_button(
+        label="📥 Descargar Pesos del Portafolio Óptimo (Excel)",
+        data=buffer,
+        file_name="pesos_markowitz.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+else:
+    st.info("💡 La simulación de riqueza aparecerá aquí una vez que se complete la optimización del portafolio.")
