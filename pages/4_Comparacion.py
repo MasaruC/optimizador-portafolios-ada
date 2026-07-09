@@ -1,320 +1,467 @@
+# -- Módulo 4 (Reescrito con Tipado Estricto) --
+
 import streamlit as st
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import plotly.express as px
-import time
 import json
 import os
 import io
+import time
+from typing import Any, Optional, List, Dict, Tuple
 
-# --- 1. CONFIGURACIÓN INICIAL ---
+# ==========================================================
+# 1. CONFIGURACIÓN DE PÁGINA
+# ==========================================================
 st.set_page_config(page_title="Módulo 4: Comparación Cruzada", page_icon="🏆", layout="wide")
 st.title("🏆 Módulo 4: Panel de Comparación Cruzada de Estrategias")
-st.markdown("Consolidación y evaluación de rendimiento de las 7 estrategias financieras implementadas en el sistema.")
+st.markdown("Consolidación y evaluación de las 7 estrategias con **un único motor de backtesting justo**.")
 
-# Verificar la existencia de los archivos de entrada indispensables
-archivos_requeridos = ["resultados_m1.json", "resultados_m2.json", "resultados_m3.json"]
-missing_files = [f for f in archivos_requeridos if not os.path.exists(f)]
+# ==========================================================
+# 2. CARGA ROBUSTA DE JSONs (SIN CACHÉ PARA EVITAR DATOS VIEJOS)
+# ==========================================================
+def cargar_json(ruta: str) -> Optional[dict]:
+    """Lee el JSON directamente del disco en cada ejecución."""
+    if not os.path.exists(ruta):
+        return None
+    try:
+        with open(ruta, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        st.error(f"❌ No se pudo leer `{ruta}`: {e}")
+        return None
 
-if missing_files:
-    st.error(f"❌ Faltan los siguientes archivos de resultados: {', '.join(missing_files)}")
-    st.info("💡 Por favor, asegúrate de entrar y ejecutar el análisis en el **Módulo 1**, **Módulo 2** y **Módulo 3** previamente para generar los datos necesarios.")
+# Botón para forzar la lectura limpia si Streamlit se queda pegado
+if st.sidebar.button("🔄 Forzar Recarga de Datos", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
+res_m1_opt = cargar_json("resultados_m1.json")
+res_m2_opt = cargar_json("resultados_m2.json")
+res_m3_opt = cargar_json("resultados_m3.json")
+
+archivos: Dict[str, Optional[dict]] = {
+    "Módulo 1 (resultados_m1.json)": res_m1_opt,
+    "Módulo 2 (resultados_m2.json)": res_m2_opt,
+    "Módulo 3 (resultados_m3.json)": res_m3_opt
+}
+faltantes = [k for k, v in archivos.items() if v is None]
+if faltantes:
+    st.error(f"❌ Faltan o están corruptos: {', '.join(faltantes)}")
+    st.info("💡 Ejecuta primero los Módulos 1, 2 y 3 para generar los JSON requeridos.")
     st.stop()
 
-# --- 2. CARGA DE RESULTADOS PREVIOS (JSON) ---
-with open("resultados_m1.json", "r", encoding="utf-8") as f:
-    res_m1 = json.load(f)
-with open("resultados_m2.json", "r", encoding="utf-8") as f:
-    res_m2 = json.load(f)
-with open("resultados_m3.json", "r", encoding="utf-8") as f:
-    res_m3 = json.load(f)
+# Afirmaciones para el type checker (Pylance)
+assert res_m1_opt is not None
+assert res_m2_opt is not None
+assert res_m3_opt is not None
 
-# Recuperar parámetros y vectores de pesos
-TICKERS = res_m1["tickers"]
-N = len(TICKERS)
-FECHA_INICIO = st.session_state.get('fecha_inicio', '2015-01-01')
-FECHA_FIN = st.session_state.get('fecha_fin', '2024-12-31')
-CAPITAL_INICIAL = st.session_state.get('capital', 100000)
-LAMBDA_TC = res_m3["parametros_dp"]["lambda_tc"]
-T_PERIODOS = res_m3["parametros_dp"]["periodos_t"]
+res_m1: dict = res_m1_opt
+res_m2: dict = res_m2_opt
+res_m3: dict = res_m3_opt
 
-# Reconstrucción de vectores de pesos desde los JSON
-w_eq = np.ones(N) / N
-w_mk = np.array([res_m1["markowitz_max_sharpe"]["pesos"].get(t, 1/N) for t in TICKERS], dtype=float)
-w_ga = np.array([res_m2["nsga2_max_sharpe"]["pesos"].get(t, 1/N) for t in TICKERS], dtype=float)
+def validar_campo(data: dict, *campos: str, archivo: str = "") -> Any:
+    nodo: Any = data
+    for c in campos:
+        if not isinstance(nodo, dict) or c not in nodo:
+            st.error(f"❌ Campo `{' → '.join(campos)}` no encontrado en {archivo}.")
+            st.stop()
+        nodo = nodo[c]
+    return nodo
 
-# --- 3. DESCARGA Y PREPARACIÓN DE LA SERIE DE TIEMPO SINCRO ---
-@st.cache_data(show_spinner=False)
-def cargar_datos_dinamicos(tickers, inicio, fin, t_horizonte, freq_code) -> tuple[pd.DataFrame, pd.DatetimeIndex]:
-    descarga = yf.download(tickers, start=inicio, end=fin, progress=False)
-    if descarga is None or descarga.empty:
-        return pd.DataFrame(), pd.DatetimeIndex([])
-    
-    df_raw = pd.DataFrame(descarga)
-    datos = df_raw['Close'] if 'Close' in df_raw.columns else df_raw
-    
-    if isinstance(datos, pd.Series):
-        datos = datos.to_frame(name=tickers[0])
-    
-    precios_resampleados = datos.ffill().bfill().resample(freq_code).last()
-    retornos_resampleados = precios_resampleados.pct_change().dropna()
-    
-    # Filtrar exactamente para los últimos T periodos evaluados
-    retornos_sim = retornos_resampleados.iloc[-t_horizonte:]
-    fechas_sim = pd.DatetimeIndex(retornos_sim.index)
-    
-    return retornos_sim, fechas_sim
+fecha_inicio_sidebar = str(st.session_state.get('fecha_inicio', ''))
+fecha_fin_sidebar = str(st.session_state.get('fecha_fin', ''))
+fecha_inicio_json = str(res_m1.get("configuracion", {}).get("fecha_inicio", ""))
 
-# Lógica dinámica de frecuencia y factores de anualización
-frecuencia_sel = st.session_state.get('frecuencia', 'Mensual')
-mapa_frecuencias = {"Semanal": "W-FRI", "Mensual": "ME", "Trimestral": "QE"}
-codigo_freq = mapa_frecuencias.get(frecuencia_sel, "ME")
+if fecha_inicio_sidebar and fecha_inicio_json and fecha_inicio_sidebar != fecha_inicio_json:
+    st.warning("⚠️ **Datos Desactualizados:** Las fechas en el Sidebar no coinciden con las del JSON. "
+               "Ve a los Módulos 1, 2 y 3, pulsa sus botones de ejecución para generar los nuevos datos, "
+               "o usa el botón **'🔄 Forzar Recarga'** en el menú lateral izquierdo.")
+# ==========================================================
+# 3. EXTRACCIÓN DE PARÁMETROS DESDE LOS JSON (sin session_state)
+# ==========================================================
+TICKERS          = list(validar_campo(res_m1, "tickers", archivo="M1"))
+N                = len(TICKERS)
+config_m1        = validar_campo(res_m1, "configuracion", archivo="M1")
+FECHA_INICIO     = str(config_m1["fecha_inicio"])
+FECHA_FIN        = str(config_m1["fecha_fin"])
+CAPITAL_INICIAL  = float(config_m1["capital_inicial"])
+frecuencia_sel   = str(config_m1["frecuencia"])
+DIAS_ANIO        = int(config_m1.get("dias_anio", 252))
+RF               = float(config_m1.get("rf", 0.0))
+
+# Extraemos lambda_tc desde la configuración de M2 (o M3 como respaldo)
+config_m2        = validar_campo(res_m2, "configuracion", archivo="M2")
+LAMBDA_TC        = float(config_m2.get("lambda_tc", float(res_m3.get("parametros_dp", {}).get("lambda_tc", 0.0010))))
+
 factor_anual = {"Semanal": 52, "Mensual": 12, "Trimestral": 4}.get(frecuencia_sel, 12)
 
-with st.spinner(f'Sincronizando series de tiempo históricas ({frecuencia_sel})...'):
-    retornos_periodo, fechas_backtest = cargar_datos_dinamicos(TICKERS, FECHA_INICIO, FECHA_FIN, T_PERIODOS, codigo_freq)
+# Parámetros DP desde M3
+params_dp = res_m3.get("parametros_dp", {})
+LAMBDA_TC   = float(params_dp.get("lambda_tc", 0.0010))
+PASO_GRILLA = float(params_dp.get("paso_grilla", 0.10))
+T_DP        = int(params_dp.get("periodos_t", 12))
 
-# --- 4. ENGINE DE SIMULACIÓN DE LAS 7 ESTRATEGIAS ---
-n_periodos = len(retornos_periodo)
+# NUEVO: Cargar grilla y política exactas de M3
+S_matriz = np.array(res_m3.get("grilla_estados", []), dtype=float)
+politica_matriz = np.array(res_m3.get("matriz_politica", []), dtype=int)
 
-# Inicializar matrices de riqueza (Tamaño: n_periodos + 1)
-W = np.zeros((7, n_periodos + 1))
-W[:, 0] = CAPITAL_INICIAL
+# ==========================================================
+# 4. EXTRACCIÓN DE PESOS ÓPTIMOS
+# ==========================================================
+def extraer_pesos(data: dict, clave_estrategia: str, archivo: str) -> np.ndarray:
+    pesos_dict = validar_campo(data, clave_estrategia, "pesos", archivo=archivo)
+    pesos_list = [float(pesos_dict.get(t, 0.0)) for t in TICKERS]
+    pesos = np.array(pesos_list, dtype=float)
+    s = float(pesos.sum())
+    if s <= 0:
+        st.error(f"❌ Pesos inválidos en {archivo}.")
+        st.stop()
+    return pesos / s
 
-# Inicializar estados dinámicos de pesos (Buy & Hold)
-w_dynamic_bh_eq = w_eq.copy()
-w_dynamic_bh_mk = w_mk.copy()
-w_dynamic_bh_ga = w_ga.copy()
+w_markowitz = extraer_pesos(res_m1, "markowitz_max_sharpe", "M1")
+w_nsga2     = extraer_pesos(res_m2, "nsga2_max_sharpe",     "M2")
+w_eq        = np.ones(N) / N
+w_target_dp = w_markowitz.copy()  # M3 usó w_markowitz como target
 
-# Simulación periodo a periodo coordinada
-for t in range(n_periodos):
-    ret_t = np.array(retornos_periodo.iloc[t].to_numpy(), dtype=float)
-    
-    # Estrategia 1: Buy & Hold Equiponderado
-    r_1 = np.dot(w_dynamic_bh_eq, ret_t)
-    W[0, t+1] = W[0, t] * (1 + r_1)
-    w_dynamic_bh_eq = w_dynamic_bh_eq * (1 + ret_t) / (1 + r_1)
-    
-    # Estrategia 2: Equiponderado (Con Rebalanceo según frecuencia)
-    tc_2 = LAMBDA_TC * np.sum(np.abs(w_eq - w_eq)) if t > 0 else 0  
-    W[1, t+1] = (W[1, t] * (1 - tc_2)) * (1 + np.dot(w_eq, ret_t))
-    
-    # Estrategia 3: Markowitz Máximo Sharpe (Buy & Hold)
-    r_3 = np.dot(w_dynamic_bh_mk, ret_t)
-    W[2, t+1] = W[2, t] * (1 + r_3)
-    w_dynamic_bh_mk = w_dynamic_bh_mk * (1 + ret_t) / (1 + r_3)
-    
-    # Estrategia 4: Markowitz Máximo Sharpe (Con Rebalanceo según frecuencia)
-    tc_4 = LAMBDA_TC * np.sum(np.abs(w_mk - w_mk)) if t > 0 else 0 
-    W[3, t+1] = (W[3, t] * (1 - tc_4)) * (1 + np.dot(w_mk, ret_t))
-    
-    # Estrategia 5: NSGA-II Genético (Buy & Hold)
-    r_5 = np.dot(w_dynamic_bh_ga, ret_t)
-    W[4, t+1] = W[4, t] * (1 + r_5)
-    w_dynamic_bh_ga = w_dynamic_bh_ga * (1 + ret_t) / (1 + r_5)
-    
-    # Estrategia 6: NSGA-II Genético (Con Rebalanceo según frecuencia)
-    tc_6 = LAMBDA_TC * np.sum(np.abs(w_ga - w_ga)) if t > 0 else 0
-    W[5, t+1] = (W[5, t] * (1 - tc_6)) * (1 + np.dot(w_ga, ret_t))
+# ==========================================================
+# 5. DESCARGA UNIFICADA DEL HISTÓRICO (mismo para todos)
+# ==========================================================
+@st.cache_data(show_spinner=False)
+def descargar_precios(tickers: List[str], inicio: str, fin: str) -> pd.DataFrame:
+    descarga = yf.download(tickers, start=inicio, end=fin, progress=False)
+    if descarga is None or descarga.empty:
+        return pd.DataFrame()
+    df = pd.DataFrame(descarga)
+    datos = df['Close'] if 'Close' in df.columns else df
+    if isinstance(datos, pd.Series):
+        datos = datos.to_frame(name=tickers[0])
+    return datos.ffill().bfill()
 
-# Estrategia 7: Programación Dinámica Inteligente 
-try:
-    W[6, :] = np.array(res_m3["trayectoria_dp"])
-except KeyError:
-    st.error("⚠️ Falta la trayectoria DP. Por favor, vuelve al Módulo 3 y presiona 'Calcular' de nuevo para actualizar el JSON.")
-    st.stop()
+with st.spinner("Descargando histórico unificado para backtest justo..."):
+    precios = descargar_precios(TICKERS, FECHA_INICIO, FECHA_FIN)
+    if precios.empty:
+        st.error("❌ No se pudieron descargar precios. Verifica los tickers y fechas.")
+        st.stop()
 
-# Nombres de las estrategias actualizados a la frecuencia
-nombres_estrategias = [
-    "1. Equiponderado (Buy & Hold)",
-    f"2. Equiponderado (Rebalanceado {frecuencia_sel})",
-    "3. Markowitz Máx Sharpe (Buy & Hold)",
-    f"4. Markowitz Máx Sharpe (Rebalanceado {frecuencia_sel})",
-    "5. NSGA-II GA (Buy & Hold)",
-    f"6. NSGA-II GA (Rebalanceado {frecuencia_sel})",
-    "7. Programación Dinámica (Bellman Óptimo)"
+mapa_freq = {"Semanal": "W-FRI", "Mensual": "ME", "Trimestral": "QE"}
+codigo_freq = mapa_freq.get(frecuencia_sel, "ME")
+precios_res   = precios.resample(codigo_freq).last()
+retornos_periodo = precios_res.pct_change().dropna()
+T = len(retornos_periodo)
+fechas_retorno = retornos_periodo.index
+fechas_sim = pd.to_datetime(np.append([precios_res.index[0]], fechas_retorno))
+
+st.info(f"📅 Periodos de backtest: **{T}**  |  Frecuencia: **{frecuencia_sel}**  |  "
+        f"Capital inicial: **${CAPITAL_INICIAL:,.2f}**  |  λ_TC: **{LAMBDA_TC:.4f}**")
+
+# ==========================================================
+# 6. MOTOR ÚNICO DE BACKTESTING
+# ==========================================================
+def backtest_estrategia(retornos_df: pd.DataFrame, w_objetivo: np.ndarray, capital_inicial: float,
+                        modo: str = "buy_hold", lambda_tc: float = 0.0, w_target_dp: Optional[np.ndarray] = None,
+                        S_dp: np.ndarray = None, politica_dp: np.ndarray = None, T_dp: int = 12) -> Tuple[np.ndarray, List[int], float]:
+    R = retornos_df.to_numpy(dtype=float)
+    T_len, N_len = R.shape
+    w_objetivo = np.asarray(w_objetivo, dtype=float)
+    if w_target_dp is None:
+        w_target_dp = w_objetivo.copy()
+
+    riqueza = np.zeros(T_len + 1)
+    riqueza[0] = capital_inicial
+    w_actual = w_objetivo.copy()
+    rebalanceos: List[int] = []
+    costo_total = 0.0
+
+    for t in range(T_len):
+        ret = R[t]
+
+        if modo == "rebalancear" and t > 0:
+            delta = np.sum(np.abs(w_actual - w_objetivo))
+            tc = lambda_tc * delta
+            costo_total += tc * riqueza[t]
+            cap_post = riqueza[t] * (1 - tc)
+            ret_port = float(np.dot(w_objetivo, ret))
+            riqueza[t + 1] = cap_post * (1 + ret_port)
+            w_actual = w_objetivo * (1 + ret) / (1 + ret_port)
+            rebalanceos.append(t)
+
+        elif modo == "dp" and t > 0:
+            # Usamos la grilla y política exactas del Módulo 3
+            if S_dp is not None and politica_dp is not None and S_dp.size > 0:
+                idx_s = int(np.argmin(np.sum(np.abs(S_dp - w_actual), axis=1)))
+                idx_a = int(politica_dp[min(t, T_dp - 1), idx_s])
+                w_dp_nuevo = S_dp[idx_a]
+                
+                if idx_s != idx_a:
+                    tc = lambda_tc * np.sum(np.abs(w_actual - w_dp_nuevo))
+                    costo_total += tc * riqueza[t]
+                    cap_post = riqueza[t] * (1 - tc)
+                    ret_port = float(np.dot(w_dp_nuevo, ret))
+                    riqueza[t + 1] = cap_post * (1 + ret_port)
+                    w_actual = w_dp_nuevo * (1 + ret) / (1 + ret_port)
+                    rebalanceos.append(t)
+                else:
+                    ret_port = float(np.dot(w_actual, ret))
+                    riqueza[t + 1] = riqueza[t] * (1 + ret_port)
+                    w_actual = w_actual * (1 + ret) / (1 + ret_port)
+            else:
+                # Fallback por si no hay matriz
+                desv = np.sum(np.abs(w_actual - w_target_dp))
+                if desv > 0.15: # Umbral simple
+                    tc = lambda_tc * desv
+                    costo_total += tc * riqueza[t]
+                    cap_post = riqueza[t] * (1 - tc)
+                    ret_port = float(np.dot(w_target_dp, ret))
+                    riqueza[t + 1] = cap_post * (1 + ret_port)
+                    w_actual = w_target_dp * (1 + ret) / (1 + ret_port)
+                    rebalanceos.append(t)
+                else:
+                    ret_port = float(np.dot(w_actual, ret))
+                    riqueza[t + 1] = riqueza[t] * (1 + ret_port)
+                    w_actual = w_actual * (1 + ret) / (1 + ret_port)
+
+        else:  # buy_hold o primer periodo
+            ret_port = float(np.dot(w_actual, ret))
+            riqueza[t + 1] = riqueza[t] * (1 + ret_port)
+            w_actual = w_actual * (1 + ret) / (1 + ret_port)
+
+    return riqueza, rebalanceos, costo_total
+
+# ==========================================================
+# 7. EJECUCIÓN DE LAS 7 ESTRATEGIAS CON EL MISMO MOTOR
+# ==========================================================
+estrategias: List[Tuple[str, str, np.ndarray, float]] = [
+    ("1. Equiponderado (Buy & Hold)",                       "buy_hold",    w_eq,        0.0),
+    (f"2. Equiponderado (Rebalanceado {frecuencia_sel})",   "rebalancear", w_eq,        LAMBDA_TC),
+    ("3. Markowitz Máx. Sharpe (Buy & Hold)",               "buy_hold",    w_markowitz, 0.0),
+    (f"4. Markowitz (Rebalanceado {frecuencia_sel})",       "rebalancear", w_markowitz, LAMBDA_TC),
+    ("5. NSGA-II (Buy & Hold)",                             "buy_hold",    w_nsga2,     0.0),
+    (f"6. NSGA-II (Rebalanceado {frecuencia_sel})",         "rebalancear", w_nsga2,     LAMBDA_TC),
+    ("7. Programación Dinámica (Bellman)",                  "dp",          w_target_dp, LAMBDA_TC),
 ]
 
-# --- 5. CÁLCULO DE MÉTRICAS FINANCIERAS AVANZADAS ---
-metricas_lista = []
+with st.spinner("Ejecutando backtesting unificado de las 7 estrategias..."):
+    trayectorias: Dict[str, np.ndarray] = {}
+    rebalanceos_dict: Dict[str, List[int]] = {}
+    costos_dict: Dict[str, float] = {}
+    for nombre, modo, w, lam in estrategias:
+        w_path, reb, cost = backtest_estrategia(
+            retornos_periodo, w, CAPITAL_INICIAL, modo, lam, w_target_dp,
+            S_matriz, politica_matriz, T_DP  # <--- AÑADIDO
+        )
+        trayectorias[nombre]    = w_path
+        rebalanceos_dict[nombre] = reb
+        costos_dict[nombre]      = cost
 
-# Ajuste dinámico del margen inicial del gráfico
-if frecuencia_sel == "Semanal":
-    offset = pd.DateOffset(weeks=1)
-elif frecuencia_sel == "Trimestral":
-    offset = pd.DateOffset(months=3)
-else:
-    offset = pd.DateOffset(months=1)
+# Matriz W (estrategias x tiempo) para animación
+nombres_estrategias = [e[0] for e in estrategias]
+W = np.vstack([trayectorias[n] for n in nombres_estrategias])
 
-fechas_completas = [fechas_backtest[0] - offset] + list(fechas_backtest)
+# ==========================================================
+# 8. CÁLCULO CORRECTO DE MÉTRICAS
+# ==========================================================
+def calcular_metricas(riqueza_path: np.ndarray, factor_anual: int, rf: float = 0.0) -> Dict[str, Any]:
+    riqueza_path = np.asarray(riqueza_path, dtype=float)
+    retornos = np.diff(riqueza_path) / riqueza_path[:-1]
+    if len(retornos) < 2:
+        return {
+            "Riqueza Final ($)": 0.0, "Retorno Total (%)": 0.0,
+            "Sharpe Ratio": 0.0, "Sortino Ratio": 0.0,
+            "Max Drawdown (%)": 0.0, "Volatilidad Anual (%)": 0.0
+        }
 
-for idx, nombre in enumerate(nombres_estrategias):
-    riqueza_path = W[idx, :]
-    retornos_path = np.diff(riqueza_path) / riqueza_path[:-1]
-    
-    ret_total = float((riqueza_path[-1] - riqueza_path[0]) / riqueza_path[0] * 100)
-    
-    # Anualización dinámica según la frecuencia seleccionada
-    mu_anual = np.mean(retornos_path) * factor_anual
-    sigma_anual = np.std(retornos_path) * np.sqrt(factor_anual)
-    
-    # Sharpe Ratio
-    sharpe = float(mu_anual / sigma_anual) if sigma_anual > 0 else 0.0
-    
-    # Sortino Ratio (Downside deviation)
-    ret_negativos = retornos_path[retornos_path < 0]
-    downside_std = np.sqrt(np.mean(ret_negativos**2)) * np.sqrt(factor_anual) if len(ret_negativos) > 0 else 1e-6
-    sortino = float(mu_anual / downside_std)
-    
-    # Max Drawdown
-    df_temp = pd.Series(riqueza_path)
-    cum_max = df_temp.cummax()
-    drawdowns = (df_temp - cum_max) / cum_max
-    max_dd = float(drawdowns.min() * 100)
-    
-    metricas_lista.append({
-        "Estrategia": nombre,
-        "Riqueza Final ($)": float(riqueza_path[-1]),
-        "Retorno Total (%)": ret_total,
-        "Sharpe Ratio": sharpe,
-        "Sortino Ratio": sortino,
-        "Max Drawdown (%)": max_dd
-    })
+    ret_total = (riqueza_path[-1] / riqueza_path[0] - 1) * 100
+    mu_p = np.mean(retornos)
+    sd_p = np.std(retornos, ddof=1)
+    mu_anual  = mu_p * factor_anual
+    sig_anual = sd_p * np.sqrt(factor_anual)
+    sharpe = (mu_anual - rf) / sig_anual if sig_anual > 0 else 0.0
 
-df_resumen = pd.DataFrame(metricas_lista)
+    downside = retornos[retornos < 0]
+    if len(downside) > 1:
+        dd_std = np.std(downside, ddof=1) * np.sqrt(factor_anual)
+        sortino = (mu_anual - rf) / dd_std if dd_std > 0 else float('nan')
+    else:
+        sortino = float('nan')
 
-# --- 6. INTERFAZ GRÁFICA Y VISUALIZACIONES ---
-st.subheader("📊 Gráfico Evolutivo de Riqueza Superpuesto (7 Curvas)")
+    cum_max = np.maximum.accumulate(riqueza_path)
+    drawdowns = (riqueza_path - cum_max) / cum_max
+    max_dd = drawdowns.min() * 100
 
-total_meses = len(fechas_completas)
+    return {
+        "Riqueza Final ($)":     float(riqueza_path[-1]),
+        "Retorno Total (%)":     float(ret_total),
+        "Sharpe Ratio":          float(sharpe),
+        "Sortino Ratio":         float(sortino),
+        "Max Drawdown (%)":      float(max_dd),
+        "Volatilidad Anual (%)": float(sig_anual * 100),
+    }
 
-# 1. Inicializar la "memoria" para que el gráfico inicie en el primer punto (vacío)
+metricas_lista: List[Dict[str, Any]] = []
+for nombre, *_ in estrategias:
+    m = calcular_metricas(trayectorias[nombre], factor_anual, RF)
+    m["Estrategia"] = nombre
+    m["Costo Total TC ($)"] = float(costos_dict[nombre])
+    m["N° Rebalanceos"]     = len(rebalanceos_dict[nombre])
+    metricas_lista.append(m)
+
+# Nombres actualizados para aclarar que son métricas históricas del backtest
+columnas_orden = [
+    "Estrategia", 
+    "Riqueza Final ($)", 
+    "Retorno Total Histórico (%)",
+    "Sharpe Ratio Histórico", 
+    "Sortino Ratio Histórico", 
+    "Max Drawdown (%)",
+    "Volatilidad Anual Histórica (%)", 
+    "Costo Total TC ($)", 
+    "N° Rebalanceos"
+]
+
+# Renombramos las llaves del diccionario para que coincidan con las columnas
+df_resumen = pd.DataFrame(metricas_lista).rename(columns={
+    "Retorno Total (%)": "Retorno Total Histórico (%)",
+    "Sharpe Ratio": "Sharpe Ratio Histórico",
+    "Sortino Ratio": "Sortino Ratio Histórico",
+    "Volatilidad Anual (%)": "Volatilidad Anual Histórica (%)"
+})[columnas_orden]
+
+# ==========================================================
+# 9. INTERFAZ GRÁFICA — ANIMACIÓN DE LAS 7 CURVAS
+# ==========================================================
+st.subheader("📊 Evolución de Riqueza Superpuesta (7 Estrategias)")
+
+total_periodos = len(fechas_sim)
 if 'mes_actual' not in st.session_state:
     st.session_state.mes_actual = 1
 
-# 2. Panel de control temporal
-col_ctrl1, col_ctrl2, col_ctrl3 = st.columns(3)
-
-with col_ctrl1:
+c1, c2, c3 = st.columns(3)
+with c1:
     if st.button("▶️ Animación Lenta", use_container_width=True):
-        st.session_state.mes_actual = 0  # Usamos 0 como señal para disparar el bucle automático
-
-with col_ctrl2:
-    if st.button("⏭️ Avanzar 1 Mes", use_container_width=True):
-        if st.session_state.mes_actual < total_meses:
+        st.session_state.mes_actual = 0
+with c2:
+    if st.button("⏭️ Avanzar 1 Periodo", use_container_width=True):
+        if st.session_state.mes_actual < total_periodos:
             st.session_state.mes_actual += 1
-
-with col_ctrl3:
-    if st.button("⏮️ Regresar 1 Mes", use_container_width=True):
+with c3:
+    if st.button("⏮️ Regresar 1 Periodo", use_container_width=True):
         if st.session_state.mes_actual > 1:
             st.session_state.mes_actual -= 1
 
 grafico_carrera = st.empty()
 st.divider()
 
-colores = ['#95a5a6', '#3498db', '#f1c40f', '#e67e22', '#9b59b6', '#34495e', '#2ecc71']
-min_y = np.min(W) * 0.95
-max_y = np.max(W) * 1.05
+colores = ['#95a5a6', '#3498db', '#f1c40f', '#e67e22',
+           '#9b59b6', '#34495e', '#2ecc71']
+min_y = float(np.min(W)) * 0.95
+max_y = float(np.max(W)) * 1.05
 
-# 3. Lógica de renderizado dinámico
-if st.session_state.mes_actual == 0:
-    # MODO ANIMADO (Bucle automático)
-    for paso in range(1, total_meses + 1, 1):
-        fig_7curvas = go.Figure()
-        for idx, nombre in enumerate(nombres_estrategias):
-            fig_7curvas.add_trace(go.Scatter(
-                x=fechas_completas[:paso], y=W[idx, :paso], mode='lines',
-                name=nombre, line=dict(color=colores[idx], width=3.5 if idx==6 else 2)
-            ))
-            
-        fig_7curvas.update_layout(
-            title=f"Simulación Histórica - Evaluando hasta: {fechas_completas[paso-1].strftime('%B %Y')}",
-            xaxis_title="Línea de Tiempo (Meses)", yaxis_title="Capital acumulado (USD)",
-            xaxis=dict(range=[fechas_completas[0], fechas_completas[-1]]), 
-            yaxis=dict(range=[min_y, max_y]), 
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            hovermode="x unified"
-        )
-        grafico_carrera.plotly_chart(fig_7curvas, use_container_width=True)
-        import time
-        time.sleep(0.15) 
-        
-    # Al terminar la animación, fijamos el estado al último mes para que no se reinicie solo
-    st.session_state.mes_actual = total_meses
-
-else:
-    # MODO MANUAL (Controlado por los botones de Avanzar/Regresar)
-    paso = st.session_state.mes_actual
-    fig_7curvas = go.Figure()
-    
+def dibujar_fig(paso: int) -> go.Figure:
+    fig = go.Figure()
     for idx, nombre in enumerate(nombres_estrategias):
-        fig_7curvas.add_trace(go.Scatter(
-            x=fechas_completas[:paso], y=W[idx, :paso], 
-            # Añadir marcadores visuales solo si ya llegamos al final de la línea temporal
-            mode='lines+markers' if (idx==6 and paso == total_meses) else 'lines',
-            name=nombre, line=dict(color=colores[idx], width=3.5 if idx==6 else 2)
+        fig.add_trace(go.Scatter(
+            x=fechas_sim[:paso], y=W[idx, :paso],
+            mode='lines+markers' if (idx == 6 and paso == total_periodos) else 'lines',
+            name=nombre,
+            line=dict(color=colores[idx], width=3.5 if idx == 6 else 2)
         ))
-        
-    titulo_fecha = fechas_completas[paso-1].strftime('%B %Y')
-    fig_7curvas.update_layout(
-        title=f"Simulación Histórica - Evaluando hasta: {titulo_fecha}",
-        xaxis_title="Línea de Tiempo (Meses)", yaxis_title="Capital acumulado (USD)",
-        xaxis=dict(range=[fechas_completas[0], fechas_completas[-1]]), 
-        yaxis=dict(range=[min_y, max_y]), 
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    # Corrección de type checker usando pd.Timestamp nativo
+    titulo_dt = pd.Timestamp(fechas_sim[paso - 1])
+    titulo = titulo_dt.strftime('%Y-%m-%d')
+    fig.update_layout(
+        title=f"Backtest Unificado — Evaluando hasta: {titulo}",
+        xaxis_title="Línea de Tiempo", yaxis_title="Capital acumulado (USD)",
+        xaxis=dict(range=[fechas_sim[0], fechas_sim[-1]]),
+        yaxis=dict(range=[min_y, max_y]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1),
         hovermode="x unified"
     )
-    grafico_carrera.plotly_chart(fig_7curvas, use_container_width=True)
+    return fig
 
-st.subheader("📋 Cuadro de Métricas Consolidadas y Rankings Automáticos")
+if st.session_state.mes_actual == 0:
+    for paso in range(1, total_periodos + 1):
+        grafico_carrera.plotly_chart(dibujar_fig(paso), use_container_width=True)
+        time.sleep(0.12)
+    st.session_state.mes_actual = total_periodos
+else:
+    grafico_carrera.plotly_chart(dibujar_fig(st.session_state.mes_actual),
+                                  use_container_width=True)
 
-col_rank1, col_rank2 = st.columns(2)
+# ==========================================================
+# 10. TABLAS DE RANKING
+# ==========================================================
+st.subheader("📋 Cuadro de Métricas Consolidadas y Rankings")
 
-with col_rank1:
-    st.markdown("**🏆 Ranking Automático por Sharpe Ratio (Eficiencia)**")
-    df_sharpe_rank = df_resumen.sort_values(by="Sharpe Ratio", ascending=False).reset_index(drop=True)
-    st.dataframe(df_sharpe_rank.style.highlight_max(axis=0, subset=["Sharpe Ratio", "Sortino Ratio"], color="#0b5c1e"), use_container_width=True)
+rc1, rc2 = st.columns(2)
+with rc1:
+    st.markdown("**🏆 Ranking por Sharpe Ratio Histórico (Eficiencia Riesgo-Retorno)**")
+    df_sharpe = df_resumen.sort_values("Sharpe Ratio Histórico", ascending=False).reset_index(drop=True)
+    st.dataframe(df_sharpe.style.highlight_max(
+        subset=["Sharpe Ratio Histórico", "Sortino Ratio Histórico"], color="#0b5c1e"
+    ), use_container_width=True)
 
-with col_rank2:
-    st.markdown("**💰 Ranking Automático por Riqueza Final Absoluta**")
-    df_wealth_rank = df_resumen.sort_values(by="Riqueza Final ($)", ascending=False).reset_index(drop=True)
-    st.dataframe(df_wealth_rank.style.highlight_max(axis=0, subset=["Riqueza Final ($)", "Retorno Total (%)"], color="#0b5c1e"), use_container_width=True)
+with rc2:
+    st.markdown("**💰 Ranking por Riqueza Final Absoluta**")
+    df_wealth = df_resumen.sort_values("Riqueza Final ($)", ascending=False).reset_index(drop=True)
+    st.dataframe(df_wealth.style.highlight_max(
+        subset=["Riqueza Final ($)", "Retorno Total Histórico (%)"], color="#0b5c1e"
+    ), use_container_width=True)
 
 st.divider()
 
-st.subheader("📊 Análisis Comparativo Visual de Métricas Clave")
-col_bar1, col_bar2 = st.columns(2)
+# ==========================================================
+# 11. GRÁFICOS COMPARATIVOS DE BARRAS
+# ==========================================================
+st.subheader("📊 Análisis Comparativo Visual")
+bc1, bc2 = st.columns(2)
+with bc1:
+    fig_w = px.bar(df_resumen.sort_values("Riqueza Final ($)"),
+                   x="Riqueza Final ($)", y="Estrategia", orientation='h',
+                   title="Capital Final Alcanzado (USD)",
+                   color="Riqueza Final ($)", color_continuous_scale="Viridis")
+    st.plotly_chart(fig_w, use_container_width=True)
 
-with col_bar1:
-    fig_bar_wealth = px.bar(
-        df_resumen.sort_values(by="Riqueza Final ($)"), 
-        x="Riqueza Final ($)", y="Estrategia", orientation='h',
-        title="Comparativa de Capital Final Alcanzado (USD)",
-        color="Riqueza Final ($)", color_continuous_scale="Viridis"
-    )
-    st.plotly_chart(fig_bar_wealth, use_container_width=True)
+with bc2:
+    fig_s = px.bar(df_resumen.sort_values("Sharpe Ratio Histórico"),
+                   x="Sharpe Ratio Histórico", y="Estrategia", orientation='h',
+                   title="Relación Riesgo-Retorno (Sharpe Ratio Histórico)",
+                   color="Sharpe Ratio Histórico", color_continuous_scale="Cividis")
+    st.plotly_chart(fig_s, use_container_width=True)
 
-with col_bar2:
-    fig_bar_sharpe = px.bar(
-        df_resumen.sort_values(by="Sharpe Ratio"), 
-        x="Sharpe Ratio", y="Estrategia", orientation='h',
-        title="Comparativa de Relación Riesgo-Retorno (Sharpe Ratio)",
-        color="Sharpe Ratio", color_continuous_scale="Cividis"
-    )
-    st.plotly_chart(fig_bar_sharpe, use_container_width=True)
+bc3, bc4 = st.columns(2)
+with bc3:
+    fig_dd = px.bar(df_resumen.sort_values("Max Drawdown (%)"),
+                    x="Max Drawdown (%)", y="Estrategia", orientation='h',
+                    title="Máximo Drawdown (%) — menos negativo es mejor",
+                    color="Max Drawdown (%)", color_continuous_scale="RdBu")
+    st.plotly_chart(fig_dd, use_container_width=True)
 
-# --- 7. EXPORTACIÓN DE RESULTADOS A EXCEL ---
+with bc4:
+    fig_tc = px.bar(df_resumen.sort_values("Costo Total TC ($)"),
+                    x="Costo Total TC ($)", y="Estrategia", orientation='h',
+                    title="Costo Total Acumulado por Transacciones (USD)",
+                    color="Costo Total TC ($)", color_continuous_scale="Magma")
+    st.plotly_chart(fig_tc, use_container_width=True)
+
+# ==========================================================
+# 12. EXPORTACIÓN A EXCEL
+# ==========================================================
 buffer = io.BytesIO()
 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
     df_resumen.to_excel(writer, index=False, sheet_name='Comparativo_General')
-    df_sharpe_rank.to_excel(writer, index=False, sheet_name='Ranking_Sharpe')
-    df_wealth_rank.to_excel(writer, index=False, sheet_name='Ranking_Riqueza')
+    df_sharpe.to_excel(writer,  index=False, sheet_name='Ranking_Sharpe')
+    df_wealth.to_excel(writer,  index=False, sheet_name='Ranking_Riqueza')
+    pd.DataFrame({n: trayectorias[n] for n in nombres_estrategias}).to_excel(
+        writer, index=False, sheet_name='Trayectorias'
+    )
 buffer.seek(0)
 
 st.download_button(
-    label="📥 Descargar Reporte Completo de Comparación y Rankings (Excel)",
+    label="📥 Descargar Reporte Completo (Excel)",
     data=buffer,
     file_name="reporte_comparativo_portafolios.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
