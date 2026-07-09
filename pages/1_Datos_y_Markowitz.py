@@ -91,6 +91,61 @@ def calcular_frontera(_mu, _Sigma, _w0, _limites, _N):
 frontera = calcular_frontera(mu, Sigma, w0, limites, N)
 vol_ind = np.sqrt(np.diag(Sigma)) # Riesgo individual de cada acción
 
+def mostrar_graficos_adicionales(w_opt, tickers, mu_anual, vol_anual, retornos_df):
+    st.divider()
+    st.subheader("📊 Análisis de Composición y Riesgo del Portafolio Óptimo")
+    
+    # 1. Composición y Comparativa individual lado a lado
+    c1, c2 = st.columns(2)
+    
+    with c1:
+        # Gráfico de Dona de Pesos
+        df_pesos = pd.DataFrame({'Ticker': tickers, 'Peso (%)': (w_opt * 100).round(2)})
+        df_pesos_filtrado = df_pesos[df_pesos['Peso (%)'] > 0.01]  # Omitir pesos insignificantes para mejor visualización
+        fig_dona = px.pie(
+            df_pesos_filtrado, 
+            values='Peso (%)', 
+            names='Ticker', 
+            title='Composición del Portafolio Óptimo (Pesos %)', 
+            hole=0.4,
+            color_discrete_sequence=px.colors.qualitative.Pastel
+        )
+        fig_dona.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5))
+        st.plotly_chart(fig_dona, use_container_width=True)
+        
+    with c2:
+        # Gráfico de Barras Agrupadas: Retorno vs Volatilidad de activos
+        df_activos = pd.DataFrame({
+            'Ticker': tickers,
+            'Retorno Anualizado (%)': (mu_anual * 100).round(2),
+            'Volatilidad Anualizada (%)': (vol_anual * 100).round(2)
+        })
+        df_long = df_activos.melt(id_vars='Ticker', value_vars=['Retorno Anualizado (%)', 'Volatilidad Anualizada (%)'],
+                                  var_name='Métrica', value_name='Valor (%)')
+        fig_activos = px.bar(
+            df_long,
+            x='Ticker',
+            y='Valor (%)',
+            color='Métrica',
+            barmode='group',
+            title='Desempeño Individual de los Activos',
+            color_discrete_sequence=['#2ecc71', '#e74c3c']
+        )
+        st.plotly_chart(fig_activos, use_container_width=True)
+        
+    # 2. Mapa de Calor de Correlación en un expansor
+    with st.expander("🔍 Ver Matriz de Correlación de los Activos"):
+        correlaciones = retornos_df.corr()
+        fig_heatmap = px.imshow(
+            correlaciones,
+            text_auto=".2f",
+            aspect="auto",
+            color_continuous_scale="RdBu",
+            zmin=-1, zmax=1,
+            title="Matriz de Correlación de Activos (Retornos Diarios)"
+        )
+        st.plotly_chart(fig_heatmap, use_container_width=True)
+
 # --- 5. INTERFAZ GRÁFICA Y VISUALIZACIÓN DEL PROCESO ---
 st.subheader("Búsqueda del Portafolio Óptimo (Máximo Sharpe)")
 
@@ -215,6 +270,7 @@ if iniciar_animacion:
         fig_final.update_layout(title='Frontera Eficiente de Markowitz (Final)', xaxis_title='Riesgo', yaxis_title='Retorno')
         
         grafico_placeholder.plotly_chart(fig_final, use_container_width=True)
+        mostrar_graficos_adicionales(w_sharpe, TICKERS_VALIDOS, mu, vol_ind, retornos)
 
 else:
     # ESTADO POR DEFECTO: Cálculo silencioso sin animación
@@ -232,6 +288,7 @@ else:
     fig_final.update_layout(title='Frontera Eficiente de Markowitz (Final)', xaxis_title='Riesgo', yaxis_title='Retorno')
     
     grafico_placeholder.plotly_chart(fig_final, use_container_width=True)
+    mostrar_graficos_adicionales(w_sharpe, TICKERS_VALIDOS, mu, vol_ind, retornos)
     metricas_placeholder.success(f"Sharpe óptimo: {sh_s:.4f} | Volatilidad: {v_s*100:.2f}% | Retorno: {r_s*100:.2f}%")
     codigo_placeholder.markdown(renderizar_codigo(8), unsafe_allow_html=True) # Mostrar en la línea final "return w_optimo"
 # --- 6. SIMULACIÓN DE RIQUEZA ---
@@ -283,6 +340,30 @@ if 'w_sharpe' in locals():
     fig_sim.add_trace(go.Scatter(x=fechas_sim, y=riqueza_bh, mode='lines', name=f'Buy & Hold (${riqueza_bh[-1]:,.2f})', line=dict(color='gray')))
     fig_sim.update_layout(title=f'Crecimiento de Estrategias (Rebalanceo {frecuencia_sel})', xaxis_title='Fecha', yaxis_title='Capital (USD)')
     st.plotly_chart(fig_sim, use_container_width=True)
+
+    # Calcular drawdowns históricos
+    def calcular_drawdown(riqueza_path):
+        cum_max = np.maximum.accumulate(riqueza_path)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            dd = (riqueza_path - cum_max) / cum_max
+            dd = np.nan_to_num(dd, nan=0.0)
+        return dd * 100  # En porcentaje
+
+    dd_mk = calcular_drawdown(riqueza_mk)
+    dd_eq = calcular_drawdown(riqueza_eq)
+    dd_bh = calcular_drawdown(riqueza_bh)
+
+    fig_dd = go.Figure()
+    fig_dd.add_trace(go.Scatter(x=fechas_sim, y=dd_mk, mode='lines', name='Drawdown Markowitz', line=dict(color='red')))
+    fig_dd.add_trace(go.Scatter(x=fechas_sim, y=dd_eq, mode='lines', name='Drawdown Equiponderado', line=dict(color='blue')))
+    fig_dd.add_trace(go.Scatter(x=fechas_sim, y=dd_bh, mode='lines', name='Drawdown Buy & Hold', line=dict(color='gray')))
+    fig_dd.update_layout(
+        title=f'Caídas Máximas de las Estrategias (Drawdown - Rebalanceo {frecuencia_sel})',
+        xaxis_title='Fecha',
+        yaxis_title='Drawdown (%)',
+        hovermode="x unified"
+    )
+    st.plotly_chart(fig_dd, use_container_width=True)
 
     # --- 7. EXPORTACIÓN DE RESULTADOS ---
     metrics = {
