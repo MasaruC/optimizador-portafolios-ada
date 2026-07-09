@@ -237,20 +237,62 @@ if st.button("🚀 Ejecutar Evolución NSGA-II", type="primary", use_container_w
         idx_mejor_sharpe = np.argmax(sharpes)
         mejor_ind = frente_pareto[idx_mejor_sharpe]
         mejor_pesos = np.array(mejor_ind) / np.sum(mejor_ind)
-        mejor_ret = retornos_pareto[idx_mejor_sharpe]
-        mejor_rsk = riesgos[idx_mejor_sharpe]
-        mejor_sharpe = sharpes[idx_mejor_sharpe]
+        
+        # ==========================
+        # Simulación histórica NSGA-II (Sincronizada 100% con M4)
+        # ==========================
+        mapa_frecuencias = {"Semanal": "W-FRI", "Mensual": "ME", "Trimestral": "QE"}
+        frecuencia_sel = st.session_state.get('frecuencia', 'Mensual')
+        codigo_freq = mapa_frecuencias.get(frecuencia_sel, "ME")
+        LAMBDA_TC = float(st.session_state.get('dp_tc', 0.0010))
+        
+        # Resampleamos los precios al igual que M1 y M4
+        precios_sim = precios.resample(codigo_freq).last()
+        retornos_sim = precios_sim.pct_change().dropna()
+        fechas_sim = np.append([precios_sim.index[0]], retornos_sim.index)
+
+        # Motor unificado (idéntico al de M4)
+        def backtest_ga(retornos_df, w_objetivo, capital_inicial, lambda_tc=0.0):
+            R = retornos_df.to_numpy(dtype=float)
+            T_len = R.shape[0]
+            w_obj = np.asarray(w_objetivo, dtype=float)
+            riqueza = np.zeros(T_len + 1)
+            riqueza[0] = capital_inicial
+            w_actual = w_obj.copy()
+            
+            for t in range(T_len):
+                ret = R[t]
+                if t > 0:
+                    delta = np.sum(np.abs(w_actual - w_obj))
+                    tc = lambda_tc * delta
+                    cap_post = riqueza[t] * (1 - tc)
+                    ret_port = float(np.dot(w_obj, ret))
+                    riqueza[t + 1] = cap_post * (1 + ret_port)
+                    w_actual = w_obj * (1 + ret) / (1 + ret_port)
+                else:
+                    ret_port = float(np.dot(w_actual, ret))
+                    riqueza[t + 1] = riqueza[t] * (1 + ret_port)
+                    w_actual = w_actual * (1 + ret) / (1 + ret_port)
+            return riqueza
+
+        riqueza_nsga = backtest_ga(retornos_sim, mejor_pesos, st.session_state.get("capital_inicial", 100000), LAMBDA_TC)
+        
+        # Extraemos los valores y los convertimos a float puro de Python
+        ret_f = float(retornos_pareto[idx_mejor_sharpe])
+        rsk_f = float(riesgos[idx_mejor_sharpe])
+        sharpe_f = float(sharpes[idx_mejor_sharpe])
 
         metricas_placeholder.success("¡Evolución completada con éxito!")
 
-        # --- 5. VISUALIZACIÓN FINAL (Estática) ---
+        # --- 5. VISUALIZACIÓN FINAL ---
         st.divider()
         st.subheader("Resultados del Mejor Individuo (Máximo Sharpe Evolutivo)")
         
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Sharpe Ratio Evolutivo", f"{mejor_sharpe:.4f}")
-        c2.metric("Retorno Esperado", f"{mejor_ret*100:.2f}%")
-        c3.metric("Riesgo (Volatilidad)", f"{mejor_rsk*100:.2f}%")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Sharpe Ratio Teórico", f"{sharpe_f:.4f}")
+        c2.metric("Retorno Esperado Anual", f"{ret_f*100:.2f}%")
+        c3.metric("Riesgo (Volatilidad)", f"{rsk_f*100:.2f}%")
+        c4.metric("Riqueza Final (Backtest)", f"${riqueza_nsga[-1]:,.2f}")
 
         col_g1, col_g2 = st.columns([2, 1])
         
@@ -262,7 +304,7 @@ if st.button("🚀 Ejecutar Evolución NSGA-II", type="primary", use_container_w
                 marker=dict(color='blue', size=8, opacity=0.7)
             ))
             fig_pareto.add_trace(go.Scatter(
-                x=[mejor_rsk], y=[mejor_ret], mode='markers',
+                x=[rsk_f], y=[ret_f], mode='markers',
                 name='Mejor Sharpe Evolutivo',
                 marker=dict(color='red', symbol='star', size=16)
             ))
@@ -287,15 +329,33 @@ if st.button("🚀 Ejecutar Evolución NSGA-II", type="primary", use_container_w
         # --- 6. EXPORTACIÓN ---
         metrics_m2 = {
             "tickers": TICKERS_VALIDOS,
+            "configuracion": {
+                "fecha_inicio": str(FECHA_INICIO),
+                "fecha_fin": str(FECHA_FIN),
+                "capital_inicial": st.session_state.get("capital_inicial",100000),
+                "frecuencia": frecuencia_sel,
+                "lambda_tc": LAMBDA_TC,
+                "poblacion": POBLACION,
+                "generaciones": GENERACIONES,
+                "dias_anio": DIAS_ANIO,
+                "rf": RF
+            },
             "nsga2_max_sharpe": {
-                "retorno": float(mejor_ret),
-                "riesgo": float(mejor_rsk),
-                "sharpe": float(mejor_sharpe),
-                "pesos": dict(zip(TICKERS_VALIDOS, mejor_pesos.round(4).tolist()))
+                "retorno": ret_f,
+                "riesgo": rsk_f,
+                "sharpe_teorico": sharpe_f,
+                "pesos": dict(zip(TICKERS_VALIDOS, mejor_pesos.round(6).tolist()))
+            },
+            "simulacion_riqueza_final": {
+                "nsga2": float(riqueza_nsga[-1])
+            },
+            "trayectorias": {
+                "fechas": [d.strftime("%Y-%m-%d") for d in fechas_sim],
+                "nsga2": riqueza_nsga.tolist()
             }
         }
         with open("resultados_m2.json", "w", encoding="utf-8") as f:
-            json.dump(metrics_m2, f, ensure_ascii=False, indent=2)
+            json.dump(metrics_m2, f, ensure_ascii=False, indent=2, default=str)
 
         buffer = io.BytesIO()
         df_export = pd.DataFrame({'Ticker': TICKERS_VALIDOS, 'Peso (%)': (mejor_pesos * 100).round(2)})
