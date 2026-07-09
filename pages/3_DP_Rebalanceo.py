@@ -36,6 +36,8 @@ if os.path.exists("resultados_m1.json"):
         if "markowitz_max_sharpe" in datos_m1:
             pesos_dict = datos_m1["markowitz_max_sharpe"]["pesos"]
             w_optimo = np.array([pesos_dict.get(t, 1/len(TICKERS)) for t in TICKERS], dtype=float)
+            if w_optimo.sum() > 0:
+                w_optimo /= w_optimo.sum()
 
 # --- 2. DESCARGA Y LIMPIEZA DE DATOS ---
 @st.cache_data(show_spinner=False)
@@ -54,7 +56,19 @@ frecuencia_sel = st.session_state.get('frecuencia', 'Mensual')
 
 with st.spinner(f'Cargando serie de tiempo y generando estados ({frecuencia_sel})...'):
     precios = cargar_datos(TICKERS, FECHA_INICIO, FECHA_FIN)
+    TICKERS = list(precios.columns)
     
+    # Recargar pesos óptimos alineados
+    w_optimo = np.ones(len(TICKERS)) / len(TICKERS)
+    if os.path.exists("resultados_m1.json"):
+        with open("resultados_m1.json", "r", encoding="utf-8") as f:
+            datos_m1 = json.load(f)
+            if "markowitz_max_sharpe" in datos_m1:
+                pesos_dict = datos_m1["markowitz_max_sharpe"]["pesos"]
+                w_optimo = np.array([pesos_dict.get(t, 1/len(TICKERS)) for t in TICKERS], dtype=float)
+                if w_optimo.sum() > 0:
+                    w_optimo /= w_optimo.sum()
+
     # 1. Mapeo dinámico de frecuencia
     mapa_frecuencias = {"Semanal": "W-FRI", "Mensual": "ME", "Trimestral": "QE"}
     codigo_freq = mapa_frecuencias.get(frecuencia_sel, "ME")
@@ -71,6 +85,11 @@ with st.spinner(f'Cargando serie de tiempo y generando estados ({frecuencia_sel}
         retornos_sim = retornos_resampleados
         fechas_sim = retornos_sim.index
         T_PERIODOS = len(retornos_sim)
+
+# Calcular retornos diarios, mu y Sigma para gráficos
+retornos_diarios = pd.DataFrame(np.log(precios / precios.shift(1))).dropna()
+mu = retornos_diarios.mean().to_numpy(dtype=float) * 252
+Sigma = retornos_diarios.cov().to_numpy(dtype=float) * 252
 
 # --- 3. CREACIÓN DEL ESPACIO DE ESTADOS (GRILLA) ---
 @st.cache_data(show_spinner=False)
@@ -208,27 +227,39 @@ if st.button("🚀 Calcular Política Óptima de Rebalanceo", type="primary", us
             w_bh = w_bh * (1 + ret) / (1 + ret_bh)
             
             # 2. Estrategia Siempre Rebalancear
-            tc_sr = LAMBDA_TC * np.sum(np.abs(w_sr - w_optimo))
-            capital_post_tc_sr = W_sr[t] * (1 - tc_sr)
-            ret_sr = np.dot(w_optimo, ret)
-            W_sr[t+1] = capital_post_tc_sr * (1 + ret_sr)
-            w_sr = w_optimo * (1 + ret) / (1 + ret_sr)
+            if t > 0:
+                tc_sr = LAMBDA_TC * np.sum(np.abs(w_sr - w_optimo))
+                capital_post_tc_sr = W_sr[t] * (1 - tc_sr)
+                ret_sr = np.dot(w_optimo, ret)
+                W_sr[t+1] = capital_post_tc_sr * (1 + ret_sr)
+                w_sr = w_optimo * (1 + ret) / (1 + ret_sr)
+            else:
+                ret_sr = np.dot(w_sr, ret)
+                W_sr[t+1] = W_sr[t] * (1 + ret_sr)
+                w_sr = w_sr * (1 + ret) / (1 + ret_sr)
             
             # 3. Estrategia Programación Dinámica
-            # Buscar el estado más cercano en nuestra grilla
-            idx_s = int(np.argmin(np.sum(np.abs(S - w_dp), axis=1)))
-            idx_a = int(politica[min(t, T_PERIODOS-1), idx_s]) # Usamos la política calculada
-            w_dp_nuevo = S[idx_a]
-            
-            if idx_s != idx_a:
-                rebalanceos_dp.append(t)
+            if t > 0:
+                # Buscar el estado más cercano en nuestra grilla
+                idx_s = int(np.argmin(np.sum(np.abs(S - w_dp), axis=1)))
+                idx_a = int(politica[min(t, T_PERIODOS-1), idx_s]) # Usamos la política calculada
+                w_dp_nuevo = S[idx_a]
                 
-            tc_dp = LAMBDA_TC * np.sum(np.abs(w_dp - w_dp_nuevo))
-            capital_post_tc_dp = W_dp[t] * (1 - tc_dp)
-            
-            ret_dp = np.dot(w_dp_nuevo, ret)
-            W_dp[t+1] = capital_post_tc_dp * (1 + ret_dp)
-            w_dp = w_dp_nuevo * (1 + ret) / (1 + ret_dp)
+                if idx_s != idx_a:
+                    rebalanceos_dp.append(t)
+                    tc_dp = LAMBDA_TC * np.sum(np.abs(w_dp - w_dp_nuevo))
+                    capital_post_tc_dp = W_dp[t] * (1 - tc_dp)
+                    ret_dp = np.dot(w_dp_nuevo, ret)
+                    W_dp[t+1] = capital_post_tc_dp * (1 + ret_dp)
+                    w_dp = w_dp_nuevo * (1 + ret) / (1 + ret_dp)
+                else:
+                    ret_dp = np.dot(w_dp, ret)
+                    W_dp[t+1] = W_dp[t] * (1 + ret_dp)
+                    w_dp = w_dp * (1 + ret) / (1 + ret_dp)
+            else:
+                ret_dp = np.dot(w_dp, ret)
+                W_dp[t+1] = W_dp[t] * (1 + ret_dp)
+                w_dp = w_dp * (1 + ret) / (1 + ret_dp)
 
         # --- 6. VISUALIZACIÓN DE RESULTADOS FINALES ---
         st.divider()
@@ -244,6 +275,88 @@ if st.button("🚀 Calcular Política Óptima de Rebalanceo", type="primary", us
 
         fig_riqueza.update_layout(title="Comparativa de Crecimiento de Capital", xaxis_title="Fecha", yaxis_title="Capital (USD)", hovermode="x unified")
         st.plotly_chart(fig_riqueza, use_container_width=True)
+
+        # Calcular drawdowns históricos para Módulos 3
+        def calcular_drawdown(riqueza_path):
+            cum_max = np.maximum.accumulate(riqueza_path)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                dd = (riqueza_path - cum_max) / cum_max
+                dd = np.nan_to_num(dd, nan=0.0)
+            return dd * 100  # En porcentaje
+
+        dd_dp = calcular_drawdown(W_dp)
+        dd_sr = calcular_drawdown(W_sr)
+        dd_bh = calcular_drawdown(W_bh)
+
+        fig_dd = go.Figure()
+        fig_dd.add_trace(go.Scatter(x=fechas_sim_full, y=dd_dp, mode='lines', name='Drawdown DP Optimizado', line=dict(color='green')))
+        fig_dd.add_trace(go.Scatter(x=fechas_sim_full, y=dd_sr, mode='lines', name='Drawdown Siempre Rebalancear', line=dict(color='red', dash='dash')))
+        fig_dd.add_trace(go.Scatter(x=fechas_sim_full, y=dd_bh, mode='lines', name='Drawdown Buy & Hold', line=dict(color='gray', dash='dot')))
+        
+        # Añadir líneas de rebalanceo en el gráfico de drawdown también para mayor contexto
+        for t_reb in rebalanceos_dp:
+            fig_dd.add_vline(x=fechas_sim_full[t_reb+1], line_width=1.0, line_dash="dash", line_color="purple")
+            
+        fig_dd.update_layout(
+            title=f'Caídas Máximas de las Estrategias (Drawdown - Rebalanceo {frecuencia_sel})',
+            xaxis_title='Fecha',
+            yaxis_title='Drawdown (%)',
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig_dd, use_container_width=True)
+
+        # --- NUEVOS GRÁFICOS ADICIONALES (Misma lógica que Módulo 1 y Módulo 2) ---
+        st.divider()
+        st.subheader("📊 Análisis de Composición y Riesgo del Portafolio Objetivo")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            # Gráfico de Dona de Pesos Objetivos
+            df_pesos = pd.DataFrame({'Ticker': TICKERS, 'Peso (%)': (w_optimo * 100).round(2)})
+            df_pesos_filtrado = df_pesos[df_pesos['Peso (%)'] > 0.01]
+            fig_dona = px.pie(
+                df_pesos_filtrado, 
+                values='Peso (%)', 
+                names='Ticker', 
+                title='Composición del Portafolio Objetivo (Pesos %)', 
+                hole=0.4,
+                color_discrete_sequence=px.colors.qualitative.Pastel
+            )
+            fig_dona.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5))
+            st.plotly_chart(fig_dona, use_container_width=True)
+            
+        with c2:
+            # Gráfico de Barras Agrupadas: Retorno vs Volatilidad de activos
+            df_activos = pd.DataFrame({
+                'Ticker': TICKERS,
+                'Retorno Anualizado (%)': (mu * 100).round(2),
+                'Volatilidad Anualizada (%)': (np.sqrt(np.diag(Sigma)) * 100).round(2)
+            })
+            df_long = df_activos.melt(id_vars='Ticker', value_vars=['Retorno Anualizado (%)', 'Volatilidad Anualizada (%)'],
+                                      var_name='Métrica', value_name='Valor (%)')
+            fig_activos = px.bar(
+                df_long,
+                x='Ticker',
+                y='Valor (%)',
+                color='Métrica',
+                barmode='group',
+                title='Desempeño Individual de los Activos',
+                color_discrete_sequence=['#2ecc71', '#e74c3c']
+            )
+            st.plotly_chart(fig_activos, use_container_width=True)
+
+        # Mapa de Calor de Correlación en un expansor
+        with st.expander("🔍 Ver Matriz de Correlación de los Activos"):
+            correlaciones = retornos_diarios.corr()
+            fig_heatmap = px.imshow(
+                correlaciones,
+                text_auto=".2f",
+                aspect="auto",
+                color_continuous_scale="RdBu",
+                zmin=-1, zmax=1,
+                title="Matriz de Correlación de Activos (Retornos Diarios)"
+            )
+            st.plotly_chart(fig_heatmap, use_container_width=True)
 
         # --- 7. EXPORTACIÓN DE RESULTADOS ---
         metrics_m3 = {
