@@ -1,4 +1,6 @@
+# pyrefly: ignore [missing-import]
 import streamlit as st
+# pyrefly: ignore [missing-import]
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -317,14 +319,86 @@ if st.button("🚀 Ejecutar Evolución NSGA-II", type="primary", use_container_w
             st.plotly_chart(fig_pareto, use_container_width=True)
 
         with col_g2:
-            df_pesos_ga = pd.DataFrame({'Ticker': TICKERS_VALIDOS, 'Peso': mejor_pesos})
-            df_pesos_ga = df_pesos_ga[df_pesos_ga['Peso'] > 0.01]
+            df_pesos_ga = pd.DataFrame({'Ticker': TICKERS_VALIDOS, 'Peso (%)': (mejor_pesos * 100).round(2)})
+            df_pesos_ga_filtrado = df_pesos_ga[df_pesos_ga['Peso (%)'] > 0.01]
             fig_pie_ga = px.pie(
-                df_pesos_ga, values='Peso', names='Ticker',
-                title='Composición Evolutiva', hole=0.3,
+                df_pesos_ga_filtrado, 
+                values='Peso (%)', 
+                names='Ticker',
+                title='Composición del Portafolio Óptimo (Pesos %)', 
+                hole=0.4,
                 color_discrete_sequence=px.colors.qualitative.Pastel
             )
+            fig_pie_ga.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5))
             st.plotly_chart(fig_pie_ga, use_container_width=True)
+
+        # --- NUEVOS GRÁFICOS ADICIONALES (Misma lógica que Módulo 1) ---
+        st.divider()
+        st.subheader("📊 Análisis de Composición y Riesgo del Portafolio Óptimo")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            # Gráfico de Barras Agrupadas: Retorno vs Volatilidad de activos
+            df_activos = pd.DataFrame({
+                'Ticker': TICKERS_VALIDOS,
+                'Retorno Anualizado (%)': (mu * 100).round(2),
+                'Volatilidad Anualizada (%)': (np.sqrt(np.diag(Sigma)) * 100).round(2)
+            })
+            df_long = df_activos.melt(id_vars='Ticker', value_vars=['Retorno Anualizado (%)', 'Volatilidad Anualizada (%)'],
+                                      var_name='Métrica', value_name='Valor (%)')
+            fig_activos = px.bar(
+                df_long,
+                x='Ticker',
+                y='Valor (%)',
+                color='Métrica',
+                barmode='group',
+                title='Desempeño Individual de los Activos',
+                color_discrete_sequence=['#2ecc71', '#e74c3c']
+            )
+            st.plotly_chart(fig_activos, use_container_width=True)
+            
+        with c2:
+            # Gráfico de Evolución de Capital (Backtest de la Estrategia NSGA-II)
+            fig_sim = go.Figure()
+            fig_sim.add_trace(go.Scatter(x=fechas_sim, y=riqueza_nsga, mode='lines', name=f'NSGA-II Rebalanceado (${riqueza_nsga[-1]:,.2f})', line=dict(color='blue')))
+            fig_sim.update_layout(title=f'Crecimiento de Estrategia NSGA-II (Rebalanceo {frecuencia_sel})', xaxis_title='Fecha', yaxis_title='Capital (USD)')
+            st.plotly_chart(fig_sim, use_container_width=True)
+
+        # Fila inferior: Drawdown y Heatmap de Correlación
+        c3, c4 = st.columns(2)
+        with c3:
+            # Calcular drawdown
+            cum_max = np.maximum.accumulate(riqueza_nsga)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                dd_nsga = (riqueza_nsga - cum_max) / cum_max
+                dd_nsga = np.nan_to_num(dd_nsga, nan=0.0)
+            dd_nsga_pct = dd_nsga * 100
+
+            fig_dd = go.Figure()
+            fig_dd.add_trace(go.Scatter(x=fechas_sim, y=dd_nsga_pct, mode='lines', name='Drawdown NSGA-II', line=dict(color='blue')))
+            fig_dd.update_layout(
+                title=f'Caída Máxima de la Estrategia (Drawdown - Rebalanceo {frecuencia_sel})',
+                xaxis_title='Fecha',
+                yaxis_title='Drawdown (%)',
+                hovermode="x unified"
+            )
+            st.plotly_chart(fig_dd, use_container_width=True)
+
+        with c4:
+            st.write("") # Mantiene el alineamiento visual
+
+        # Mapa de Calor de Correlación en un expansor para mantener la limpieza
+        with st.expander("🔍 Ver Matriz de Correlación de los Activos"):
+            correlaciones = retornos.corr()
+            fig_heatmap = px.imshow(
+                correlaciones,
+                text_auto=".2f",
+                aspect="auto",
+                color_continuous_scale="RdBu",
+                zmin=-1, zmax=1,
+                title="Matriz de Correlación de Activos (Retornos Diarios)"
+            )
+            st.plotly_chart(fig_heatmap, use_container_width=True)
 
         # --- 6. EXPORTACIÓN ---
         metrics_m2 = {
