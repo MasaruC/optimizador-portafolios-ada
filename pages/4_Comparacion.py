@@ -391,6 +391,32 @@ else:
     grafico_carrera.plotly_chart(dibujar_fig(st.session_state.mes_actual),
                                   use_container_width=True)
 
+    # Calcular y graficar drawdowns de las 7 estrategias
+    def calcular_drawdown(riqueza_path):
+        cum_max = np.maximum.accumulate(riqueza_path)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            dd = (riqueza_path - cum_max) / cum_max
+            dd = np.nan_to_num(dd, nan=0.0)
+        return dd * 100
+
+    fig_dd_all = go.Figure()
+    for idx, nombre in enumerate(nombres_estrategias):
+        dd_path = calcular_drawdown(W[idx])
+        fig_dd_all.add_trace(go.Scatter(
+            x=fechas_sim, y=dd_path,
+            mode='lines',
+            name=nombre,
+            line=dict(color=colores[idx], width=2.5 if idx == 6 else 1.5)
+        ))
+    fig_dd_all.update_layout(
+        title="Evolución de Caídas Máximas (Drawdown - 7 Estrategias)",
+        xaxis_title="Línea de Tiempo", yaxis_title="Drawdown (%)",
+        xaxis=dict(range=[fechas_sim[0], fechas_sim[-1]]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hovermode="x unified"
+    )
+    st.plotly_chart(fig_dd_all, use_container_width=True)
+
 # ==========================================================
 # 10. TABLAS DE RANKING
 # ==========================================================
@@ -416,7 +442,48 @@ st.divider()
 # ==========================================================
 # 11. GRÁFICOS COMPARATIVOS DE BARRAS
 # ==========================================================
-st.subheader("📊 Análisis Comparativo Visual")
+st.subheader("📊 Análisis de Frontera Eficiente y Distribución de Activos")
+
+c1, c2 = st.columns(2)
+with c1:
+    # Scatter Plot: Riesgo vs Retorno de las 7 estrategias
+    fig_risk_return = px.scatter(
+        df_resumen,
+        x='Volatilidad Anual Histórica (%)',
+        y='Retorno Total Histórico (%)',
+        color='Sharpe Ratio Histórico',
+        size='Riqueza Final ($)',
+        text='Estrategia',
+        title='Perfil Riesgo-Retorno de las 7 Estrategias (Backtest)',
+        color_continuous_scale='Viridis',
+        labels={
+            'Volatilidad Anual Histórica (%)': 'Volatilidad Anual Histórica (%)', 
+            'Retorno Total Histórico (%)': 'Retorno Total Histórico (%)'
+        }
+    )
+    fig_risk_return.update_traces(textposition='top center', marker=dict(line=dict(width=1, color='DarkSlateGrey')))
+    fig_risk_return.update_layout(xaxis=dict(range=[df_resumen['Volatilidad Anual Histórica (%)'].min() * 0.9, df_resumen['Volatilidad Anual Histórica (%)'].max() * 1.1]))
+    st.plotly_chart(fig_risk_return, use_container_width=True)
+
+with c2:
+    # Grouped Bar Chart: Comparativa de pesos por método
+    df_pesos_comp = pd.DataFrame({
+        'Ticker': TICKERS * 3,
+        'Peso (%)': np.concatenate([w_markowitz * 100, w_nsga2 * 100, w_eq * 100]).round(2),
+        'Método': ['Markowitz'] * len(TICKERS) + ['NSGA-II (GA)'] * len(TICKERS) + ['Equiponderado'] * len(TICKERS)
+    })
+    fig_pesos_comp = px.bar(
+        df_pesos_comp,
+        x='Ticker',
+        y='Peso (%)',
+        color='Método',
+        barmode='group',
+        title='Comparación de Pesos de Portafolio por Método',
+        color_discrete_sequence=['#e74c3c', '#9b59b6', '#3498db']
+    )
+    st.plotly_chart(fig_pesos_comp, use_container_width=True)
+
+st.subheader("📊 Análisis Comparativo Visual (Métricas Clave)")
 bc1, bc2 = st.columns(2)
 with bc1:
     fig_w = px.bar(df_resumen.sort_values("Riqueza Final ($)"),
