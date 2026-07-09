@@ -181,9 +181,15 @@ if st.button("🚀 Calcular Política Óptima de Rebalanceo", type="primary", us
         time.sleep(1)
 
         # --- 5. SIMULACIÓN HACIA ADELANTE (FORWARD SIMULATION) ---
-        W_bh = np.zeros(T_PERIODOS + 1)
-        W_sr = np.zeros(T_PERIODOS + 1)
-        W_dp = np.zeros(T_PERIODOS + 1)
+        # Obtenemos TODOS los periodos del histórico para que sea comparable con M1, M2 y M4
+        precios_res_full = precios.resample(codigo_freq).last()
+        retornos_sim_full = precios_res_full.pct_change().dropna()
+        T_full = len(retornos_sim_full)
+        fechas_sim_full = np.append([precios_res_full.index[0]], retornos_sim_full.index)
+        
+        W_bh = np.zeros(T_full + 1)
+        W_sr = np.zeros(T_full + 1)
+        W_dp = np.zeros(T_full + 1)
         
         W_bh[0] = W_sr[0] = W_dp[0] = CAPITAL_INICIAL
         
@@ -193,8 +199,8 @@ if st.button("🚀 Calcular Política Óptima de Rebalanceo", type="primary", us
         
         rebalanceos_dp = []
         
-        for t in range(T_PERIODOS):
-            ret = np.array(retornos_sim.iloc[t].values, dtype=float)
+        for t in range(T_full):
+            ret = np.array(retornos_sim_full.iloc[t].values, dtype=float)
             
             # 1. Estrategia Buy & Hold
             ret_bh = np.dot(w_bh, ret)
@@ -209,8 +215,9 @@ if st.button("🚀 Calcular Política Óptima de Rebalanceo", type="primary", us
             w_sr = w_optimo * (1 + ret) / (1 + ret_sr)
             
             # 3. Estrategia Programación Dinámica
+            # Buscar el estado más cercano en nuestra grilla
             idx_s = int(np.argmin(np.sum(np.abs(S - w_dp), axis=1)))
-            idx_a = int(politica[t, idx_s])
+            idx_a = int(politica[min(t, T_PERIODOS-1), idx_s]) # Usamos la política calculada
             w_dp_nuevo = S[idx_a]
             
             if idx_s != idx_a:
@@ -225,17 +232,15 @@ if st.button("🚀 Calcular Política Óptima de Rebalanceo", type="primary", us
 
         # --- 6. VISUALIZACIÓN DE RESULTADOS FINALES ---
         st.divider()
-        st.subheader(f"Rendimiento de Estrategias (Últimos {T_PERIODOS} periodos de frecuencia {frecuencia_sel.lower()})")
-        
-        fechas_plot = [fechas_sim[0] - pd.DateOffset(months=1)] + list(fechas_sim)
+        st.subheader(f"Rendimiento de Estrategias (Histórico Completo - Frecuencia {frecuencia_sel})")
         
         fig_riqueza = go.Figure()
-        fig_riqueza.add_trace(go.Scatter(x=fechas_plot, y=W_dp, mode='lines+markers', name=f'DP Optimizado (${W_dp[-1]:,.2f})', line=dict(color='green', width=3)))
-        fig_riqueza.add_trace(go.Scatter(x=fechas_plot, y=W_sr, mode='lines', name=f'Siempre Rebalancear (${W_sr[-1]:,.2f})', line=dict(color='red', dash='dash')))
-        fig_riqueza.add_trace(go.Scatter(x=fechas_plot, y=W_bh, mode='lines', name=f'Buy & Hold (${W_bh[-1]:,.2f})', line=dict(color='gray', dash='dot')))
+        fig_riqueza.add_trace(go.Scatter(x=fechas_sim_full, y=W_dp, mode='lines', name=f'DP Optimizado (${W_dp[-1]:,.2f})', line=dict(color='green', width=3)))
+        fig_riqueza.add_trace(go.Scatter(x=fechas_sim_full, y=W_sr, mode='lines', name=f'Siempre Rebalancear (${W_sr[-1]:,.2f})', line=dict(color='red', dash='dash')))
+        fig_riqueza.add_trace(go.Scatter(x=fechas_sim_full, y=W_bh, mode='lines', name=f'Buy & Hold (${W_bh[-1]:,.2f})', line=dict(color='gray', dash='dot')))
         
         for t_reb in rebalanceos_dp:
-            fig_riqueza.add_vline(x=fechas_plot[t_reb+1], line_width=1.5, line_dash="dash", line_color="purple", annotation_text="Rebalanceo", annotation_position="bottom right")
+            fig_riqueza.add_vline(x=fechas_sim_full[t_reb+1], line_width=1.5, line_dash="dash", line_color="purple", annotation_text="Rebalanceo", annotation_position="bottom right")
 
         fig_riqueza.update_layout(title="Comparativa de Crecimiento de Capital", xaxis_title="Fecha", yaxis_title="Capital (USD)", hovermode="x unified")
         st.plotly_chart(fig_riqueza, use_container_width=True)
@@ -254,7 +259,10 @@ if st.button("🚀 Calcular Política Óptima de Rebalanceo", type="primary", us
                 "dp_optimizado": float(W_dp[-1])
             },
             "timeline_rebalanceos_dp": [int(x) for x in rebalanceos_dp],
-            "trayectoria_dp": W_dp.tolist()
+            "trayectoria_dp": W_dp.tolist(),
+            "fechas_completas": [d.strftime("%Y-%m-%d") for d in fechas_sim_full],
+            "grilla_estados": S.tolist(),
+            "matriz_politica": politica.tolist()
         }
         
         with open("resultados_m3.json", "w", encoding="utf-8") as f:
