@@ -238,57 +238,79 @@ else:
 st.subheader("Simulación de Evolución de Riqueza")
 
 if 'w_sharpe' in locals():
-    # 1. Aplicamos el mapeo de frecuencia dinámico del sidebar
     mapa_frecuencias = {"Semanal": "W-FRI", "Mensual": "ME", "Trimestral": "QE"}
     frecuencia_sel = st.session_state.get('frecuencia', 'Mensual')
     codigo_freq = mapa_frecuencias.get(frecuencia_sel, "ME")
+    factor_anual = {"Semanal": 52, "Mensual": 12, "Trimestral": 4}.get(frecuencia_sel, 12)
+    LAMBDA_TC = float(st.session_state.get('dp_tc', 0.0010))
 
-    # 2. Resampleamos con los nuevos nombres
-    precios_resampleados = precios.resample(codigo_freq).last()
-    retornos_resampleados = precios_resampleados.pct_change().dropna()
-    n_periodos = len(retornos_resampleados)
+    precios_res = precios.resample(codigo_freq).last()
+    retornos_res = precios_res.pct_change().dropna()
 
-    riqueza_bh = np.zeros(n_periodos + 1)
-    riqueza_mk = np.zeros(n_periodos + 1)
-    riqueza_eq = np.zeros(n_periodos + 1)
-    riqueza_bh[0] = riqueza_mk[0] = riqueza_eq[0] = CAPITAL_INICIAL
-
-    pesos_bh = w0.copy()
-    w_eq = np.ones(N) / N
-
-    # Iteramos sobre n_periodos en lugar de n_meses
-    for i in range(n_periodos):
-        ret_periodo = np.array(retornos_resampleados.iloc[i].values, dtype=float)
+    # Motor unificado de backtesting (idéntico al de M4)
+    def backtest_estrategia(retornos_df, w_objetivo, capital_inicial, modo="buy_hold", lambda_tc=0.0):
+        R = retornos_df.to_numpy(dtype=float)
+        T_len = R.shape[0]
+        w_obj = np.asarray(w_objetivo, dtype=float)
+        riqueza = np.zeros(T_len + 1)
+        riqueza[0] = capital_inicial
+        w_actual = w_obj.copy()
         
-        riqueza_eq[i+1] = riqueza_eq[i] * (1 + np.dot(w_eq, ret_periodo))
-        riqueza_mk[i+1] = riqueza_mk[i] * (1 + np.dot(w_sharpe, ret_periodo))
-        
-        ret_portafolio_bh = np.dot(pesos_bh, ret_periodo)
-        riqueza_bh[i+1] = riqueza_bh[i] * (1 + ret_portafolio_bh)
-        pesos_bh = pesos_bh * (1 + ret_periodo) / (1 + ret_portafolio_bh)
+        for t in range(T_len):
+            ret = R[t]
+            if modo == "rebalancear" and t > 0:
+                delta = np.sum(np.abs(w_actual - w_obj))
+                tc = lambda_tc * delta
+                cap_post = riqueza[t] * (1 - tc)
+                ret_port = float(np.dot(w_obj, ret))
+                riqueza[t + 1] = cap_post * (1 + ret_port)
+                w_actual = w_obj * (1 + ret) / (1 + ret_port)
+            else: # buy_hold
+                ret_port = float(np.dot(w_actual, ret))
+                riqueza[t + 1] = riqueza[t] * (1 + ret_port)
+                w_actual = w_actual * (1 + ret) / (1 + ret_port)
+        return riqueza
 
-    # Actualizamos las referencias para la gráfica
-    fechas_sim = np.append([precios_resampleados.index[0]], retornos_resampleados.index)
+    riqueza_eq = backtest_estrategia(retornos_res, np.ones(N)/N, CAPITAL_INICIAL, "rebalancear", LAMBDA_TC)
+    riqueza_mk = backtest_estrategia(retornos_res, w_sharpe, CAPITAL_INICIAL, "rebalancear", LAMBDA_TC)
+    riqueza_bh = backtest_estrategia(retornos_res, w_sharpe, CAPITAL_INICIAL, "buy_hold", 0.0)
+
+    fechas_sim = np.append([precios_res.index[0]], retornos_res.index)
 
     fig_sim = go.Figure()
     fig_sim.add_trace(go.Scatter(x=fechas_sim, y=riqueza_mk, mode='lines', name=f'Markowitz Rebalanceado (${riqueza_mk[-1]:,.2f})', line=dict(color='red')))
     fig_sim.add_trace(go.Scatter(x=fechas_sim, y=riqueza_eq, mode='lines', name=f'Equiponderado (${riqueza_eq[-1]:,.2f})', line=dict(color='blue')))
     fig_sim.add_trace(go.Scatter(x=fechas_sim, y=riqueza_bh, mode='lines', name=f'Buy & Hold (${riqueza_bh[-1]:,.2f})', line=dict(color='gray')))
-
     fig_sim.update_layout(title=f'Crecimiento de Estrategias (Rebalanceo {frecuencia_sel})', xaxis_title='Fecha', yaxis_title='Capital (USD)')
     st.plotly_chart(fig_sim, use_container_width=True)
 
     # --- 7. EXPORTACIÓN DE RESULTADOS ---
     metrics = {
         "tickers": TICKERS_VALIDOS,
+        "configuracion": {
+            "fecha_inicio": str(FECHA_INICIO),
+            "fecha_fin": str(FECHA_FIN),
+            "capital_inicial": CAPITAL_INICIAL,
+            "frecuencia": frecuencia_sel,
+            "dias_anio": DIAS_ANIO,
+            "rf": RF
+        },
         "markowitz_max_sharpe": {
-            "retorno": float(r_s), "riesgo": float(v_s), "sharpe": float(sh_s),
-            "pesos": dict(zip(TICKERS_VALIDOS, w_sharpe.round(4).tolist()))
+            "retorno": float(r_s),
+            "riesgo": float(v_s),
+            "sharpe_teorico": float(sh_s), # Cambiamos el nombre para evitar confusión con el de M4
+            "pesos": dict(zip(TICKERS_VALIDOS, w_sharpe.round(6).tolist()))
         },
         "simulacion_riqueza_final": {
             "buy_and_hold": float(riqueza_bh[-1]),
             "equiponderado": float(riqueza_eq[-1]),
             "markowitz": float(riqueza_mk[-1])
+        },
+        "trayectorias": {
+            "fechas": [d.strftime("%Y-%m-%d") for d in fechas_sim],
+            "buy_and_hold": riqueza_bh.tolist(),
+            "equiponderado": riqueza_eq.tolist(),
+            "markowitz": riqueza_mk.tolist()
         }
     }
     with open("resultados_m1.json", "w", encoding="utf-8") as f:
